@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>测试上传</title>
+    <style>
+        body { font-family: Arial; padding: 20px; background: #1a1a2e; color: #eee; }
+        .container { max-width: 600px; margin: 0 auto; }
+        input, button { padding: 10px; margin: 10px 0; width: 100%; box-sizing: border-box; }
+        button { background: #4CAF50; color: white; border: none; cursor: pointer; }
+        button:hover { background: #45a049; }
+        #result { margin-top: 20px; padding: 15px; background: #16213e; border-radius: 5px; }
+        .success { color: #4CAF50; }
+        .error { color: #f44336; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PDF 上传测试 (端口 8001)</h1>
+        <input type="file" id="fileInput" accept=".pdf">
+        <button onclick="uploadFile()">上传文件</button>
+        <div id="result"></div>
+    </div>
+
+    <script>
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const resultDiv = document.getElementById('result');
+            
+            if (!fileInput.files[0]) {
+                resultDiv.innerHTML = '<p class="error">请先选择文件</p>';
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            resultDiv.innerHTML = '<p>上传中...</p>';
+
+            try {
+                console.log('[DEBUG] 开始上传:', file.name, file.size);
+                
+                const response = await fetch('http://localhost:8001/api/v1/analyze/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                console.log('[DEBUG] 响应状态:', response.status);
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('[ERROR] 服务器错误:', errorText);
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+
+                const data = await response.json();
+                console.log('[DEBUG] 上传成功:', data);
+                
+                resultDiv.innerHTML = `
+                    <p class="success">上传成功!</p>
+                    <p>任务ID: ${data.task_id}</p>
+                    <p>文件名: ${data.filename}</p>
+                    <p>大小: ${(data.size / 1024).toFixed(2)} KB</p>
+                `;
+            } catch (error) {
+                console.error('[ERROR] 上传失败:', error);
+                resultDiv.innerHTML = `<p class="error">上传失败: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>
