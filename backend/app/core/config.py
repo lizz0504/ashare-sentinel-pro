@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Tushare Pro Configuration
     # --------------------------------------------
     TUSHARE_TOKEN: str | None = None
+    DISABLE_TUSHARE: bool = False  # 完全禁用 Tushare，只使用 AkShare
 
     # --------------------------------------------
     # Application Settings

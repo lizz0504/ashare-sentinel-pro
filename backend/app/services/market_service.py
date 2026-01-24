@@ -18,12 +18,18 @@ _data_fetcher = None
 # Always import AkShare as fallback
 import akshare as ak
 
+# 检查是否完全禁用 Tushare
 try:
-    from app.services.data_fetcher import DataFetcher
-    _USE_TUSHARE = True
-    print("[INFO] DataFetcher module available, Tushare support enabled")
+    from app.core.config import settings
+    if getattr(settings, 'DISABLE_TUSHARE', False):
+        _USE_TUSHARE = False
+        print("[DATA SOURCE] 📈 Tushare disabled by configuration (DISABLE_TUSHARE=True)")
+    else:
+        from app.services.data_fetcher import DataFetcher
+        _USE_TUSHARE = True
+        print("[DATA SOURCE] 🔍 DataFetcher module found - Tushare Pro support available")
 except ImportError:
-    print("[WARN] DataFetcher module not found, using AkShare only")
+    print("[DATA SOURCE] 📈 DataFetcher module not found - will use AkShare only")
 
 # ============================================
 # 缓存配置
@@ -68,13 +74,14 @@ def _get_data_fetcher():
 
             if token:
                 _data_fetcher = DataFetcher(token=token)
-                print("[INFO] Using Tushare Pro data source")
+                print("[DATA SOURCE] ✅ Tushare Pro initialized successfully (Token configured)")
             else:
-                print("[WARN] TUSHARE_TOKEN not set, falling back to AkShare")
+                print("[DATA SOURCE] ⚠️  TUSHARE_TOKEN not set in environment, falling back to AkShare")
                 _USE_TUSHARE = False
                 import akshare as ak
         except Exception as e:
-            print(f"[WARN] Failed to initialize DataFetcher: {e}, falling back to AkShare")
+            print(f"[DATA SOURCE] ❌ Failed to initialize Tushare Pro: {e}")
+            print(f"[DATA SOURCE] 📈 Falling back to AkShare")
             _USE_TUSHARE = False
             import akshare as ak
     return _data_fetcher
@@ -675,6 +682,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         if _USE_TUSHARE:
             fetcher = _get_data_fetcher()
             if fetcher:
+                print(f"[DATA SOURCE] 📊 Using Tushare Pro for {symbol}")
                 stock_df = fetcher.get_stock_daily(
                     symbol=normalized_symbol,
                     start_date=start_str,
@@ -682,6 +690,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                 )
                 # 获取沪深300作为基准
                 try:
+                    print(f"[DATA SOURCE] 📊 Using Tushare Pro for index 000300 (HS300)")
                     index_df = fetcher.get_index_daily(
                         symbol="000300",
                         start_date=start_str,
@@ -692,6 +701,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                     index_df = None
             else:
                 # 降级到 AkShare
+                print(f"[DATA SOURCE] 📈 Tushare unavailable, falling back to AkShare for {symbol}")
                 stock_df = _retry_akshare_call(
                     ak.stock_zh_a_hist,
                     symbol=normalized_symbol,
@@ -699,6 +709,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                     end_date=end_date.strftime('%Y%m%d')
                 )
                 try:
+                    print(f"[DATA SOURCE] 📈 Using AkShare for index 000300 (HS300)")
                     index_df = _retry_akshare_call(
                         ak.index_zh_a_hist,
                         symbol="000300",
@@ -710,6 +721,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                     print(f"[WARN] Failed to fetch index data: {e}")
                     index_df = None
         else:
+            print(f"[DATA SOURCE] 📈 Using AkShare for {symbol} (Tushare not enabled)")
             stock_df = _retry_akshare_call(
                 ak.stock_zh_a_hist,
                 symbol=normalized_symbol,
@@ -717,6 +729,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                 end_date=end_date.strftime('%Y%m%d')
             )
             try:
+                print(f"[DATA SOURCE] 📈 Using AkShare for index 000300 (HS300)")
                 index_df = _retry_akshare_call(
                     ak.index_zh_a_hist,
                     symbol="000300",

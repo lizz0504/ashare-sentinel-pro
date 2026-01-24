@@ -8,6 +8,21 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Plus, Trash2, Loader2, Sparkles, Building2, Activity, Zap, Play, RefreshCw } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 
+// 导入新的工具函数
+import { isMarketOpen, isCacheValid } from "@/lib/utils/marketTime"
+import {
+  getTechnicalCache,
+  setTechnicalCache,
+  getSentimentCache,
+  setSentimentCache,
+  clearTechnicalCache,
+  clearSentimentCache,
+  getPortfolioCache,
+  setPortfolioCache,
+  type TechnicalCache,
+  type SentimentCache
+} from "@/lib/utils/cache"
+
 // ============================================
 // Mock Data (用于开发测试)
 // ============================================
@@ -89,6 +104,20 @@ interface PortfolioItem {
   notes: string | null
   created_at: string
   updated_at: string
+  // 持久化字段（从数据库的缓存数据）
+  last_price?: number | null
+  last_health_score?: number | null
+  last_updated_at?: string | null
+  // 技术分析详细字段（用于完整显示）
+  tech_ma20_status?: string | null
+  tech_ma5_status?: string | null
+  tech_volume_status?: string | null
+  tech_volume_change_pct?: number | null
+  tech_alpha?: number | null
+  tech_k_line_pattern?: string | null
+  tech_pattern_signal?: string | null
+  tech_action_signal?: string | null
+  tech_analysis_date?: string | null
 }
 
 interface WeeklyReview {
@@ -151,18 +180,44 @@ export default function PortfolioPage() {
   const [reportText, setReportText] = useState<string | null>(null)
   const [isGeneratingReport, setIsGeneratingReport] = useState(false)
   const [showReportModal, setShowReportModal] = useState(false)
+  // 新增：强制刷新状态（绕过缓存）
+  const [forceRefresh, setForceRefresh] = useState(false)
+  // 新增：市场状态提示
+  const [marketStatus, setMarketStatus] = useState<{ isOpen: boolean; message: string }>({
+    isOpen: false,
+    message: ""
+  })
 
-  const API_BASE = "http://localhost:8003"
+  // 使用环境变量或默认值
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8003"
 
   // ============================================
-  // Data Loading Functions
+  // Data Loading Functions (with Cache Support)
   // ============================================
-  const loadMarketSentiment = async () => {
+
+  /**
+   * 加载市场情绪数据（带缓存）
+   * - 如果在收盘后且有缓存，直接使用缓存
+   * - 如果在开盘期间，缓存有效期为5分钟
+   */
+  const loadMarketSentiment = async (force: boolean = false) => {
+    // 如果不是强制刷新，先检查缓存
+    if (!force) {
+      const cached = getSentimentCache()
+      if (cached) {
+        setMarketSentiment(cached)
+        console.log("[Cache] Using cached sentiment data")
+        return
+      }
+    }
+
     try {
       const response = await fetch(`${API_BASE}/api/v1/market/sentiment`)
       if (response.ok) {
         const data = await response.json()
         setMarketSentiment(data)
+        // 保存到缓存
+        setSentimentCache(data)
       } else {
         // Use mock data if API fails
         console.log("Using mock sentiment data")
@@ -174,12 +229,30 @@ export default function PortfolioPage() {
     }
   }
 
-  const loadTechnicalAnalysis = async (symbol: string) => {
+  /**
+   * 加载技术分析数据（带缓存）
+   * - 如果在收盘后且有缓存，直接使用缓存
+   * - 如果在开盘期间，缓存有效期为2分钟
+   * - 支持强制刷新（绕过缓存）
+   */
+  const loadTechnicalAnalysis = async (symbol: string, force: boolean = false) => {
+    // 如果不是强制刷新，先检查缓存
+    if (!force) {
+      const cached = getTechnicalCache(symbol)
+      if (cached) {
+        setTechnicalData(prev => ({ ...prev, [symbol]: cached }))
+        console.log(`[Cache] Using cached technical data for ${symbol}`)
+        return cached
+      }
+    }
+
     try {
       const response = await fetch(`${API_BASE}/api/v1/market/technical/${symbol}`)
       if (response.ok) {
         const data = await response.json()
         setTechnicalData(prev => ({ ...prev, [symbol]: data }))
+        // 保存到缓存
+        setTechnicalCache(symbol, data)
         return data
       } else {
         console.warn(`API returned ${response.status} for ${symbol}`)
@@ -202,33 +275,149 @@ export default function PortfolioPage() {
     return null
   }
 
+  /**
+   * 加载投资组合数据（Phase 1 - 秒开）
+   * - 立即返回数据库中的数据（包含持久化的 last_price 等字段）
+   * - 不等待技术分析 API 请求
+   */
   const loadPortfolio = async () => {
     try {
+      console.log(`[API] Fetching portfolio from ${API_BASE}/api/v1/portfolio`)
       const response = await fetch(`${API_BASE}/api/v1/portfolio`)
-      if (!response.ok) throw new Error("Failed to load portfolio")
+
+      console.log(`[API] Response status: ${response.status}, ok: ${response.ok}`)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`[API] Error response:`, errorText)
+        throw new Error(`Failed to load portfolio (HTTP ${response.status}): ${errorText}`)
+      }
+
       const data = await response.json()
+      console.log(`[API] Portfolio data loaded:`, data)
       setPortfolio(data)
+      // 保存到缓存（用于快速加载）
+      setPortfolioCache(data)
     } catch (error) {
       console.error("Error loading portfolio:", error)
+      // 如果 API 失败，尝试使用缓存
+      const cached = getPortfolioCache()
+      if (cached) {
+        setPortfolio(cached)
+        console.log("[Cache] Using cached portfolio data")
+      } else {
+        console.error("[Cache] No cached data available")
+      }
     } finally {
       setIsLoadingPortfolio(false)
     }
   }
 
   useEffect(() => {
-    loadPortfolio()
-    loadMarketSentiment()
-  }, [])
+    const loadData = async () => {
+      // Phase 1: 立即加载 portfolio 和 sentiment（并行）
+      // 使用缓存数据实现秒开
+      await Promise.all([
+        loadPortfolio(),
+        loadMarketSentiment(forceRefresh)
+      ])
 
+      // 更新市场状态提示
+      const isOpen = isMarketOpen()
+      setMarketStatus({
+        isOpen,
+        message: isOpen ? "🟢 市场开盘中" : "🔴 市场收盘（使用缓存数据）"
+      })
+
+      // 重置强制刷新标志
+      if (forceRefresh) {
+        setForceRefresh(false)
+      }
+    }
+    loadData()
+  }, [forceRefresh])
+
+  // Phase 1.5: 当 portfolio 数据加载完成后，使用持久化数据初始化 technicalData
   useEffect(() => {
     if (portfolio?.items) {
+      const initialTechnicalData: Record<string, TechnicalAnalysis> = {}
       portfolio.items.forEach(item => {
-        if (/^\d{6}$/.test(item.symbol)) {
-          loadTechnicalAnalysis(item.symbol)
+        // 如果数据库中有完整的技术分析数据，直接使用
+        if (item.last_price !== null && item.tech_action_signal !== null) {
+          initialTechnicalData[item.symbol] = {
+            symbol: item.symbol,
+            current_price: item.last_price!,
+            ma5: 0,
+            ma20: 0,
+            ma20_status: item.tech_ma20_status || "未知",
+            ma5_status: item.tech_ma5_status || "未知",
+            volume_status: item.tech_volume_status || "未知",
+            volume_change_pct: item.tech_volume_change_pct || 0,
+            alpha: item.tech_alpha || 0,
+            health_score: item.last_health_score!,
+            k_line_pattern: item.tech_k_line_pattern || "未知",
+            pattern_signal: item.tech_pattern_signal || "neutral",
+            date: item.tech_analysis_date || new Date().toLocaleDateString('zh-CN'),
+            action_signal: item.tech_action_signal || "HOLD",
+            analysis: `数据更新于 ${item.tech_analysis_date || (item.last_updated_at ? new Date(item.last_updated_at).toLocaleDateString('zh-CN') : new Date().toLocaleDateString('zh-CN'))}`,
+          }
+          console.log(`[Phase 1.5] Using complete cached data for ${item.symbol}: ${item.tech_action_signal}, ¥${item.last_price}`)
         }
       })
+
+      // 如果有持久化数据，立即更新状态
+      if (Object.keys(initialTechnicalData).length > 0) {
+        setTechnicalData(prev => ({ ...prev, ...initialTechnicalData }))
+      }
     }
   }, [portfolio])
+
+  // Phase 2: 后台静默更新技术分析数据（不阻塞 UI）
+  useEffect(() => {
+    if (portfolio?.items && portfolio.items.length > 0) {
+      // 批量加载技术分析数据，避免并发过多
+      const aShareItems = portfolio.items.filter(item => /^\d{6}$/.test(item.symbol))
+
+      // 检查缓存数据的完整性（优先检查 technicalData 状态，然后是 LocalStorage）
+      const hasCompleteCache = (symbol: string) => {
+        // 首先检查 Phase 1.5 已经加载到状态中的数据（从数据库）
+        const stateData = technicalData[symbol]
+        if (stateData && stateData.ma20_status !== "未知" && stateData.k_line_pattern !== "未知") {
+          return true
+        }
+
+        // 然后检查 LocalStorage 缓存
+        const cached = getTechnicalCache(symbol)
+        if (!cached) return false
+        // 检查是否是占位符数据（Phase 1.5 初始化的数据）
+        return cached.ma20_status !== "数据加载中..." &&
+               cached.ma5_status !== "数据加载中..." &&
+               cached.k_line_pattern !== "数据加载中..."
+      }
+
+      // 如果市场未开盘且所有股票都有完整缓存，跳过 API 请求
+      if (!isMarketOpen()) {
+        const allCached = aShareItems.every(item => hasCompleteCache(item.symbol))
+
+        if (allCached) {
+          console.log("[Phase 2] ✅ Market closed, using complete cached data for all stocks")
+          return
+        }
+      }
+
+      // 使用批量加载，每次最多 2 个并发
+      const loadInBatches = async (items: typeof aShareItems, batchSize = 2) => {
+        for (let i = 0; i < items.length; i += batchSize) {
+          const batch = items.slice(i, i + batchSize)
+          await Promise.all(batch.map(item =>
+            loadTechnicalAnalysis(item.symbol, forceRefresh)
+          ))
+        }
+      }
+
+      loadInBatches(aShareItems)
+    }
+  }, [portfolio, technicalData])
 
   // ============================================
   // Action Handlers
@@ -357,10 +546,13 @@ export default function PortfolioPage() {
     setRefreshingStocks(prev => new Set(prev).add(stockSymbol))
 
     try {
+      // 使用强制刷新（绕过缓存）
       const response = await fetch(`${API_BASE}/api/v1/market/technical/${stockSymbol}`)
       if (response.ok) {
         const data = await response.json()
         setTechnicalData(prev => ({ ...prev, [stockSymbol]: data }))
+        // 更新缓存
+        setTechnicalCache(stockSymbol, data)
         console.log(`✓ Refreshed ${stockSymbol}: ${data.action_signal}`)
       } else {
         console.error(`Failed to refresh ${stockSymbol}: HTTP ${response.status}`)
@@ -376,17 +568,18 @@ export default function PortfolioPage() {
     }
   }
 
-  const handleRefreshAll = async () => {
-    if (!portfolio?.items) return
+  /**
+   * 强制刷新所有数据（绕过缓存）
+   */
+  const handleForceRefreshAll = () => {
+    // 清除所有缓存
+    clearSentimentCache()
+    clearTechnicalCache()
 
-    // Refresh all A-share stocks
-    const aShareSymbols = portfolio.items
-      .filter(item => /^\d{6}$/.test(item.symbol))
-      .map(item => item.symbol)
+    // 设置强制刷新标志
+    setForceRefresh(true)
 
-    for (const symbol of aShareSymbols) {
-      await handleRefreshStock(symbol)
-    }
+    console.log("[Force Refresh] All caches cleared, reloading data...")
   }
 
   const handleGenerateReport = async () => {
@@ -498,14 +691,22 @@ export default function PortfolioPage() {
             <Zap className="w-8 h-8 text-amber-400" />
             智能复盘中心
           </h1>
-          <p className="mt-2 text-slate-400">Smart Review Center - AI驱动的投资组合分析</p>
+          <div className="mt-2 flex items-center gap-3">
+            <p className="text-slate-400">Smart Review Center - AI驱动的投资组合分析</p>
+            {marketStatus.message && (
+              <Badge variant="outline" className={marketStatus.isOpen ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" : "bg-slate-500/20 text-slate-400 border-slate-500/30"}>
+                {marketStatus.message}
+              </Badge>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-3">
           <Button
-            onClick={handleRefreshAll}
+            onClick={handleForceRefreshAll}
             disabled={refreshingStocks.size > 0}
             variant="outline"
-            className="border-slate-600 text-slate-300 hover:bg-slate-800 hover:text-white"
+            className="border-blue-600 text-blue-300 hover:bg-blue-900 hover:text-white"
+            title="清除缓存并强制刷新所有数据"
           >
             {refreshingStocks.size > 0 ? (
               <React.Fragment>
@@ -515,7 +716,7 @@ export default function PortfolioPage() {
             ) : (
               <React.Fragment>
                 <RefreshCw className="w-4 h-4 mr-2" />
-                全部刷新
+                刷新全部
               </React.Fragment>
             )}
           </Button>
@@ -663,9 +864,17 @@ export default function PortfolioPage() {
           Module 2: Portfolio Table
           ======================================== */}
       {isLoadingPortfolio ? (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
-        </div>
+        <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
+          <CardContent className="py-16">
+            <div className="flex flex-col items-center justify-center space-y-4">
+              <Loader2 className="w-12 h-12 animate-spin text-blue-400" />
+              <div className="text-center">
+                <p className="text-lg font-medium text-slate-200">正在加载投资组合...</p>
+                <p className="text-sm text-slate-500 mt-1">从云端获取数据</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       ) : portfolio && portfolio.items.length > 0 ? (
         <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
           <CardHeader>

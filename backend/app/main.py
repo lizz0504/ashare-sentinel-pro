@@ -100,6 +100,20 @@ class PortfolioItem(BaseModel):
     notes: str | None
     created_at: str
     updated_at: str
+    # 持久化字段（缓存最后一次技术分析数据）
+    last_price: float | None = None
+    last_health_score: int | None = None
+    last_updated_at: str | None = None
+    # 技术分析详细字段（用于完整显示，避免 Phase 2 重复请求）
+    tech_ma20_status: str | None = None
+    tech_ma5_status: str | None = None
+    tech_volume_status: str | None = None
+    tech_volume_change_pct: float | None = None
+    tech_alpha: float | None = None
+    tech_k_line_pattern: str | None = None
+    tech_pattern_signal: str | None = None
+    tech_action_signal: str | None = None
+    tech_analysis_date: str | None = None
 
 
 class PortfolioResponse(BaseModel):
@@ -310,7 +324,8 @@ async def get_portfolio():
             item = PortfolioItem(**item_data)
 
             # 如果股票缺少名称或行业为"其他"，尝试从AkShare更新
-            if not item.name or item.sector in [None, "其他", "未分类"]:
+            # 注意：暂时禁用自动更新，避免外部服务连接问题导致接口失败
+            if False and (not item.name or item.sector in [None, "其他", "未分类"]):
                 try:
                     from app.services.market_service import get_stock_info
                     print(f"[INFO] Updating stock info for {item.symbol}...")
@@ -524,12 +539,63 @@ async def get_market_sentiment_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def update_portfolio_persistent_data(symbol: str, technical_data: dict) -> bool:
+    """
+    异步更新投资组合的持久化数据（不阻塞主流程）
+
+    当技术分析接口请求成功后，将完整的技术分析数据持久化到 Supabase
+    """
+    try:
+        db = get_db_client()
+        result = db.table("portfolio").select("id").eq("symbol", symbol).execute()
+
+        if result.data:
+            portfolio_id = result.data[0]["id"]
+            from datetime import datetime
+
+            # 将 health_score 转换为整数（数据库字段是 integer 类型）
+            health_score = technical_data.get("health_score", 0)
+            if health_score is not None:
+                health_score = int(health_score)
+
+            # 准备完整的更新数据
+            update_data = {
+                # 基础字段
+                "last_price": technical_data.get("current_price"),
+                "last_health_score": health_score,
+                "last_updated_at": datetime.now().isoformat(),
+                # 技术分析详细字段
+                "tech_ma20_status": technical_data.get("ma20_status"),
+                "tech_ma5_status": technical_data.get("ma5_status"),
+                "tech_volume_status": technical_data.get("volume_status"),
+                "tech_volume_change_pct": technical_data.get("volume_change_pct"),
+                "tech_alpha": technical_data.get("alpha"),
+                "tech_k_line_pattern": technical_data.get("k_line_pattern"),
+                "tech_pattern_signal": technical_data.get("pattern_signal"),
+                "tech_action_signal": technical_data.get("action_signal"),
+                "tech_analysis_date": str(datetime.now().date()),
+            }
+
+            db.table("portfolio").update(update_data).eq("id", portfolio_id).execute()
+            action_signal = technical_data.get("action_signal", "N/A")
+            current_price = technical_data.get("current_price", 0)
+            print(f"[DB UPDATE] ✅ Saved to database: {symbol} | 信号: {action_signal} | 价格: ¥{current_price}")
+            return True
+    except Exception as e:
+        print(f"[DB UPDATE] ❌ Failed to update {symbol}: {e}")
+    return False
+
+
 @app.get("/api/v1/market/technical/{symbol}")
-async def get_stock_technical_analysis_endpoint(symbol: str):
+async def get_stock_technical_analysis_endpoint(symbol: str, update_persistent: bool = True):
     """
     获取个股技术分析（包含K线形态识别）
+
+    Args:
+        symbol: 股票代码
+        update_persistent: 是否更新持久化数据（默认True）
     """
-    print(f"[INFO] Fetching technical analysis for: {symbol}")
+    print(f"\n[API] 📡 Technical analysis request for {symbol}")
 
     try:
         # 验证股票代码格式
@@ -561,7 +627,19 @@ async def get_stock_technical_analysis_endpoint(symbol: str):
                 "date": datetime.now().strftime('%Y-%m-%d')
             }
 
-        print(f"[OK] Technical analysis: {technical['k_line_pattern']}, Score={technical['health_score']}")
+        # 异步更新持久化数据（不阻塞响应）
+        if update_persistent:
+            # 使用后台线程更新数据库，避免阻塞主响应
+            import threading
+            print(f"[API] 🔄 Spawning background thread to update database for {symbol}...")
+            thread = threading.Thread(
+                target=update_portfolio_persistent_data,
+                args=(symbol, technical),
+                daemon=True
+            )
+            thread.start()
+
+        print(f"[API] ✅ Analysis complete: {technical['k_line_pattern']}, Score={technical['health_score']}")
         return technical
 
     except Exception as e:
