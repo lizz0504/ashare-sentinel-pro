@@ -189,7 +189,10 @@ export default function PortfolioPage() {
   })
 
   // 使用环境变量或默认值
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8003"
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+
+  // Debug: 打印 API_BASE 值
+  console.log("[DEBUG] API_BASE =", API_BASE, "(env:", process.env.NEXT_PUBLIC_API_URL || "not set", ")")
 
   // ============================================
   // Data Loading Functions (with Cache Support)
@@ -201,6 +204,7 @@ export default function PortfolioPage() {
    * - 如果在开盘期间，缓存有效期为5分钟
    */
   const loadMarketSentiment = async (force: boolean = false) => {
+    const startTime = performance.now()
     // 如果不是强制刷新，先检查缓存
     if (!force) {
       const cached = getSentimentCache()
@@ -212,9 +216,17 @@ export default function PortfolioPage() {
     }
 
     try {
+      const fetchStart = performance.now()
       const response = await fetch(`${API_BASE}/api/v1/market/sentiment`)
+      const fetchTime = performance.now() - fetchStart
+      console.log(`[⏱️ SENTIMENT FETCH] took: ${fetchTime.toFixed(0)}ms`)
+
       if (response.ok) {
+        const jsonStart = performance.now()
         const data = await response.json()
+        const jsonTime = performance.now() - jsonStart
+        console.log(`[⏱️ SENTIMENT JSON] took: ${jsonTime.toFixed(0)}ms`)
+
         setMarketSentiment(data)
         // 保存到缓存
         setSentimentCache(data)
@@ -226,6 +238,9 @@ export default function PortfolioPage() {
     } catch (error) {
       console.log("Using mock sentiment data due to error:", error)
       setMarketSentiment(MOCK_SENTIMENT)
+    } finally {
+      const totalTime = performance.now() - startTime
+      console.log(`[⏱️ SENTIMENT TOTAL] took: ${totalTime.toFixed(0)}ms`)
     }
   }
 
@@ -281,10 +296,14 @@ export default function PortfolioPage() {
    * - 不等待技术分析 API 请求
    */
   const loadPortfolio = async () => {
+    const startTime = performance.now()
     try {
       console.log(`[API] Fetching portfolio from ${API_BASE}/api/v1/portfolio`)
-      const response = await fetch(`${API_BASE}/api/v1/portfolio`)
 
+      const fetchStart = performance.now()
+      const response = await fetch(`${API_BASE}/api/v1/portfolio`)
+      const fetchTime = performance.now() - fetchStart
+      console.log(`[⏱️ FETCH] fetch() call took: ${fetchTime.toFixed(0)}ms`)
       console.log(`[API] Response status: ${response.status}, ok: ${response.ok}`)
 
       if (!response.ok) {
@@ -293,9 +312,20 @@ export default function PortfolioPage() {
         throw new Error(`Failed to load portfolio (HTTP ${response.status}): ${errorText}`)
       }
 
+      const jsonStart = performance.now()
+
       const data = await response.json()
-      console.log(`[API] Portfolio data loaded:`, data)
+      const jsonTime = performance.now() - jsonStart
+      console.log(`[⏱️ JSON] response.json() took: ${jsonTime.toFixed(0)}ms`)
+      console.log(`[API] Portfolio data loaded: ${data.items.length} items, ${Object.keys(data.grouped || {}).length} sectors`)
+      // 不要打印完整数据，避免浏览器卡顿
+      // console.log(`[API] Portfolio data loaded:`, data)
+
+      const setStateStart = performance.now()
       setPortfolio(data)
+      const setStateTime = performance.now() - setStateStart
+      console.log(`[⏱️ STATE] setPortfolio() took: ${setStateTime.toFixed(0)}ms`)
+
       // 保存到缓存（用于快速加载）
       setPortfolioCache(data)
     } catch (error) {
@@ -310,17 +340,25 @@ export default function PortfolioPage() {
       }
     } finally {
       setIsLoadingPortfolio(false)
+      const totalTime = performance.now() - startTime
+      console.log(`[⏱️ TOTAL] loadPortfolio() took: ${totalTime.toFixed(0)}ms`)
     }
   }
 
   useEffect(() => {
     const loadData = async () => {
+      const pageLoadStart = performance.now()
+      console.log(`[⏱️ PERFORMANCE] Page load started at ${new Date().toLocaleTimeString()}`)
+
       // Phase 1: 立即加载 portfolio 和 sentiment（并行）
       // 使用缓存数据实现秒开
+      const phase1Start = performance.now()
       await Promise.all([
         loadPortfolio(),
         loadMarketSentiment(forceRefresh)
       ])
+      const phase1Time = performance.now() - phase1Start
+      console.log(`[⏱️ PERFORMANCE] Phase 1 completed: ${phase1Time.toFixed(0)}ms`)
 
       // 更新市场状态提示
       const isOpen = isMarketOpen()
@@ -333,6 +371,9 @@ export default function PortfolioPage() {
       if (forceRefresh) {
         setForceRefresh(false)
       }
+
+      const totalTime = performance.now() - pageLoadStart
+      console.log(`[⏱️ PERFORMANCE] Total page load time: ${totalTime.toFixed(0)}ms`)
     }
     loadData()
   }, [forceRefresh])
@@ -340,7 +381,12 @@ export default function PortfolioPage() {
   // Phase 1.5: 当 portfolio 数据加载完成后，使用持久化数据初始化 technicalData
   useEffect(() => {
     if (portfolio?.items) {
+      const phase15Start = performance.now()
+      console.log(`[Phase 1.5] 🚀 Starting Phase 1.5 with ${portfolio.items.length} items`)
+
       const initialTechnicalData: Record<string, TechnicalAnalysis> = {}
+      const cacheStart = performance.now()
+
       portfolio.items.forEach(item => {
         // 如果数据库中有完整的技术分析数据，直接使用
         if (item.last_price !== null && item.tech_action_signal !== null) {
@@ -370,10 +416,19 @@ export default function PortfolioPage() {
         }
       })
 
+      const cacheTime = performance.now() - cacheStart
+      console.log(`[Phase 1.5] 📦 Cache write took: ${cacheTime.toFixed(0)}ms`)
+
       // 如果有持久化数据，立即更新状态
       if (Object.keys(initialTechnicalData).length > 0) {
+        const setStateStart = performance.now()
         setTechnicalData(prev => ({ ...prev, ...initialTechnicalData }))
+        const setStateTime = performance.now() - setStateStart
+        console.log(`[Phase 1.5] ⚡ setTechnicalData took: ${setStateTime.toFixed(0)}ms for ${Object.keys(initialTechnicalData).length} stocks`)
       }
+
+      const totalPhase15Time = performance.now() - phase15Start
+      console.log(`[Phase 1.5] ✅ Total Phase 1.5 took: ${totalPhase15Time.toFixed(0)}ms`)
     }
   }, [portfolio])
 
@@ -402,24 +457,39 @@ export default function PortfolioPage() {
         return false
       }
 
+      // 使用批量加载，每次最多 2 个并发
+      const loadInBatches = async (items: typeof aShareItems, batchSize = 2) => {
+        console.log(`[Phase 2] 🚀 Loading ${items.length} stocks in batches...`)
+        for (let i = 0; i < items.length; i += batchSize) {
+          const batch = items.slice(i, i + batchSize)
+          console.log(`[Phase 2] 📦 Batch ${Math.floor(i/batchSize) + 1}:`, batch.map(i => i.symbol))
+          await Promise.all(batch.map(item =>
+            loadTechnicalAnalysis(item.symbol, forceRefresh)
+          ))
+        }
+      }
+
       // 如果市场未开盘且所有股票都有完整缓存，跳过 API 请求
       if (!isMarketOpen()) {
+        const cacheStatus = aShareItems.map(item => ({
+          symbol: item.symbol,
+          hasCache: hasCompleteCache(item.symbol)
+        }))
+        console.log("[Phase 2] 📊 Cache status:", cacheStatus)
+
         const allCached = aShareItems.every(item => hasCompleteCache(item.symbol))
+        const uncachedSymbols = aShareItems.filter(item => !hasCompleteCache(item.symbol)).map(i => i.symbol)
 
         if (allCached) {
           console.log("[Phase 2] ✅ Market closed, using complete cached data for all stocks")
           return
         }
-      }
 
-      // 使用批量加载，每次最多 2 个并发
-      const loadInBatches = async (items: typeof aShareItems, batchSize = 2) => {
-        for (let i = 0; i < items.length; i += batchSize) {
-          const batch = items.slice(i, i + batchSize)
-          await Promise.all(batch.map(item =>
-            loadTechnicalAnalysis(item.symbol, forceRefresh)
-          ))
-        }
+        // 即使市场收盘，也要为没有缓存的股票加载数据
+        console.log("[Phase 2] 🔄 Market closed but loading uncached stocks:", uncachedSymbols)
+        const itemsToLoad = aShareItems.filter(item => !hasCompleteCache(item.symbol))
+        loadInBatches(itemsToLoad)
+        return
       }
 
       loadInBatches(aShareItems)
@@ -550,28 +620,45 @@ export default function PortfolioPage() {
   }
 
   const handleRefreshStock = async (stockSymbol: string) => {
+    console.log(`[🔄 REFRESH] Starting refresh for ${stockSymbol}`)
     setRefreshingStocks(prev => new Set(prev).add(stockSymbol))
 
     try {
+      const apiUrl = `${API_BASE}/api/v1/market/technical/${stockSymbol}`
+      console.log(`[🔄 REFRESH] Fetching from: ${apiUrl}`)
+
       // 使用强制刷新（绕过缓存）
-      const response = await fetch(`${API_BASE}/api/v1/market/technical/${stockSymbol}`)
+      const fetchStart = performance.now()
+      const response = await fetch(apiUrl)
+      const fetchTime = performance.now() - fetchStart
+      console.log(`[🔄 REFRESH] Fetch took: ${fetchTime.toFixed(0)}ms, status: ${response.status}`)
+
       if (response.ok) {
+        const jsonStart = performance.now()
         const data = await response.json()
+        const jsonTime = performance.now() - jsonStart
+        console.log(`[🔄 REFRESH] JSON parse took: ${jsonTime.toFixed(0)}ms`)
+        console.log(`[🔄 REFRESH] Received data:`, data)
+
         setTechnicalData(prev => ({ ...prev, [stockSymbol]: data }))
         // 更新缓存
         setTechnicalCache(stockSymbol, data)
-        console.log(`✓ Refreshed ${stockSymbol}: ${data.action_signal}`)
+        console.log(`[🔄 REFRESH] ✅ Success: ${stockSymbol} - ${data.action_signal}, price: ${data.current_price}`)
       } else {
-        console.error(`Failed to refresh ${stockSymbol}: HTTP ${response.status}`)
+        const errorText = await response.text()
+        console.error(`[🔄 REFRESH] ❌ Failed: HTTP ${response.status}, body:`, errorText)
+        alert(`刷新失败 (${response.status}): ${errorText}`)
       }
     } catch (error) {
-      console.error(`Error refreshing ${stockSymbol}:`, error)
+      console.error(`[🔄 REFRESH] ❌ Error refreshing ${stockSymbol}:`, error)
+      alert(`刷新失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setRefreshingStocks(prev => {
         const newSet = new Set(prev)
         newSet.delete(stockSymbol)
         return newSet
       })
+      console.log(`[🔄 REFRESH] Finished refresh for ${stockSymbol}`)
     }
   }
 

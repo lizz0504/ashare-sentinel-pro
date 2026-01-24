@@ -312,12 +312,17 @@ async def get_portfolio():
     Returns:
         所有股票及其按板块分组的视图
     """
-    print(f"[INFO] Fetching portfolio")
+    import time
+    start_time = time.time()
+    print(f"[INFO] ===== Portfolio GET request received at {time.strftime('%H:%M:%S.%f')[:-3]} =====")
 
     db = get_db_client()
     try:
         # 获取所有股票
+        query_start = time.time()
         result = db.table("portfolio").select("*").order("created_at", desc=True).execute()
+        query_time = time.time() - query_start
+        print(f"[INFO] Database query took: {query_time:.3f}s, returned {len(result.data)} rows")
 
         items = []
         for item_data in result.data:
