@@ -111,6 +111,7 @@ _STOCK_DATABASE = {
     '000725': {'name': '京东方A', 'sector': '科技', 'industry': '半导体'},
     '002475': {'name': '立讯精密', 'sector': '科技', 'industry': '消费电子'},
     '002028': {'name': '索菲亚', 'sector': '消费品', 'industry': '家居'},
+    '600584': {'name': '长电科技', 'sector': '科技', 'industry': '半导体'},
     '300124': {'name': '汇川技术', 'sector': '工業', 'industry': '自动化'},
     '601390': {'name': '中国中铁', 'sector': '工業', 'industry': '基建'},
     '601766': {'name': '中国中车', 'sector': '工業', 'industry': '轨道交通'},
@@ -228,6 +229,8 @@ def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
     """
     从Tushare/AkShare获取股票详细信息（包括行业）
 
+    优先级: 雪球接口 > Tushare > 东方财富接口
+
     Returns:
         {
             "name": str,
@@ -236,88 +239,113 @@ def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
         }
     """
     try:
-        # 优先使用 Tushare
+        # 方案1: 优先使用雪球接口（更稳定）
+        print(f"[INFO] Fetching stock details from 雪球 (xq) for {symbol}...")
+        try:
+            # 雪球接口需要带交易所前缀
+            xq_symbol = symbol
+            if len(symbol) == 6:
+                if symbol.startswith('6'):
+                    xq_symbol = f"SH{symbol}"
+                else:
+                    xq_symbol = f"SZ{symbol}"
+
+            info_df = ak.stock_individual_basic_info_xq(symbol=xq_symbol, timeout=5)
+            if info_df is not None and not info_df.empty:
+                info_dict = dict(zip(info_df['item'], info_df['value']))
+
+                stock_name = info_dict.get('org_short_name_cn', None)
+
+                # 解析行业信息（雪球返回的是 dict 类型）
+                industry_dict = info_dict.get('affiliate_industry', {})
+                industry = None
+                if isinstance(industry_dict, dict) and 'ind_name' in industry_dict:
+                    industry = industry_dict['ind_name']
+
+                if stock_name:
+                    # 根据行业名称推测板块
+                    sector = _infer_sector_from_industry(industry) if industry else "其他"
+
+                    print(f"[OK] Got from 雪球: {stock_name}, industry={industry}, sector={sector}")
+                    return {
+                        "name": stock_name,
+                        "industry": industry or "其他",
+                        "sector": sector
+                    }
+        except Exception as e:
+            print(f"[WARN] 雪球接口失败: {e}")
+
+        # 方案2: 尝试 Tushare
         if _USE_TUSHARE:
             fetcher = _get_data_fetcher()
             if fetcher:
-                print(f"[INFO] Fetching stock details from Tushare for {symbol}...")
-                result = fetcher.get_stock_info(symbol)
-                if result:
-                    print(f"[OK] Got stock details from Tushare: {result.get('name')}, industry={result.get('industry')}, sector={result.get('sector')}")
-                    return result
+                print(f"[INFO] Trying Tushare for {symbol}...")
+                try:
+                    result = fetcher.get_stock_info(symbol)
+                    if result:
+                        print(f"[OK] Got from Tushare: {result.get('name')}, industry={result.get('industry')}, sector={result.get('sector')}")
+                        return result
+                except Exception as e:
+                    print(f"[WARN] Tushare failed: {e}")
 
-        # 降级到 AkShare
-        print(f"[INFO] Fetching stock details from AkShare for {symbol}...")
-        # 使用 stock_individual_info_em 获取个股信息
+        # 方案3: 降级到东方财富接口
+        print(f"[INFO] Trying 东方财富 (em) for {symbol}...")
         info_df = ak.stock_individual_info_em(symbol=symbol)
         if info_df is not None and not info_df.empty:
             # 将DataFrame转换为字典
             info_dict = dict(zip(info_df['item'], info_df['value']))
 
             stock_name = info_dict.get('股票简称', symbol)
-
-            # 获取行业信息
             industry = info_dict.get('所属行业', None)
 
-            # 根据行业名称推测板块
-            sector = "其他"
-            if industry:
-                if any(x in industry for x in ['银行', '保险', '证券', '信托']):
-                    sector = '金融'
-                elif any(x in industry for x in ['医药', '生物', '医疗', '保健']):
-                    sector = '医疗健康'
-                elif any(x in industry for x in ['电子', '计算机', '软件', '通信', '互联网']):
-                    sector = '科技'
-                elif any(x in industry for x in ['汽车', '新能源', '光伏', '风电']):
-                    sector = '新能源'
-                elif any(x in industry for x in ['白酒', '食品', '家电', '纺织', '服饰']):
-                    sector = '消费品'
-                elif any(x in industry for x in ['化工', '钢铁', '有色', '建材']):
-                    sector = '材料'
-                elif any(x in industry for x in ['电力', '水务', '燃气']):
-                    sector = '公用事业'
-                elif any(x in industry for x in ['建筑', '装修', '基建']):
-                    sector = '工业'
-                elif any(x in industry for x in ['房地产']):
-                    sector = '房地产'
-                elif any(x in industry for x in ['交通运输', '物流', '航空']):
-                    sector = '交通运输'
-                elif any(x in industry for x in ['传媒', '娱乐', '教育']):
-                    sector = '文化娱乐'
-                else:
-                    sector = '其他'
-            else:
-                # 如果没有行业信息，根据股票代码推测
-                # 600xxx, 601xxx, 603xxx, 605xxx = 上海主板
-                # 000xxx, 001xxx = 深圳主板
-                # 002xxx = 深圳中小板
-                # 300xxx = 深圳创业板
-                # 688xxx = 上海科创板
-                if symbol.startswith('688'):
-                    sector = '科技'  # 科创板多为科技股
-                elif symbol.startswith('300'):
-                    sector = '科技'  # 创业板多为科技/成长股
-                elif symbol.startswith('002'):
-                    sector = '工业'  # 中小板
-                else:
-                    sector = '其他'
+            if stock_name and stock_name != symbol:
+                sector = _infer_sector_from_industry(industry) if industry else "其他"
+                print(f"[OK] Got from 东方财富: {stock_name}, industry={industry}, sector={sector}")
+                return {
+                    "name": stock_name,
+                    "industry": industry or "其他",
+                    "sector": sector
+                }
 
-            # 如果还是没有行业，设置默认值
-            if not industry:
-                industry = sector  # 用板块作为行业
+        print(f"[WARN] All AkShare sources failed for {symbol}")
+        return None
 
-            print(f"[OK] Got stock details from AkShare: {stock_name}, industry={industry}, sector={sector}")
-            return {
-                "name": stock_name,
-                "industry": industry,
-                "sector": sector
-            }
     except Exception as e:
-        print(f"[WARN] Failed to fetch stock details: {e}")
+        print(f"[ERROR] Failed to fetch stock details: {e}")
         import traceback
         traceback.print_exc()
+        return None
 
-    return None
+
+def _infer_sector_from_industry(industry: str | None) -> str:
+    """根据行业名称推测板块"""
+    if not industry:
+        return "其他"
+
+    if any(x in industry for x in ['银行', '保险', '证券', '信托']):
+        return '金融'
+    elif any(x in industry for x in ['医药', '生物', '医疗', '保健']):
+        return '医疗健康'
+    elif any(x in industry for x in ['电子', '计算机', '软件', '通信', '互联网', '半导体']):
+        return '科技'
+    elif any(x in industry for x in ['汽车', '新能源', '光伏', '风电', '锂电池']):
+        return '新能源'
+    elif any(x in industry for x in ['白酒', '食品', '家电', '纺织', '服饰']):
+        return '消费品'
+    elif any(x in industry for x in ['化工', '钢铁', '有色', '建材']):
+        return '材料'
+    elif any(x in industry for x in ['电力', '水务', '燃气']):
+        return '公用事业'
+    elif any(x in industry for x in ['建筑', '装修', '基建', '机械']):
+        return '工业'
+    elif any(x in industry for x in ['房地产']):
+        return '房地产'
+    elif any(x in industry for x in ['交通运输', '物流', '航空']):
+        return '交通运输'
+    elif any(x in industry for x in ['传媒', '娱乐', '教育']):
+        return '文化娱乐'
+    else:
+        return '其他'
 
 
 def get_stock_info(symbol: str, fetch_price: bool = True, max_retries: int = 0) -> Optional[Dict]:

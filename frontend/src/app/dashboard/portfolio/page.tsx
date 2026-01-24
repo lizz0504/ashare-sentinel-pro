@@ -344,7 +344,7 @@ export default function PortfolioPage() {
       portfolio.items.forEach(item => {
         // 如果数据库中有完整的技术分析数据，直接使用
         if (item.last_price !== null && item.tech_action_signal !== null) {
-          initialTechnicalData[item.symbol] = {
+          const techData: TechnicalAnalysis = {
             symbol: item.symbol,
             current_price: item.last_price!,
             ma5: 0,
@@ -361,7 +361,12 @@ export default function PortfolioPage() {
             action_signal: item.tech_action_signal || "HOLD",
             analysis: `数据更新于 ${item.tech_analysis_date || (item.last_updated_at ? new Date(item.last_updated_at).toLocaleDateString('zh-CN') : new Date().toLocaleDateString('zh-CN'))}`,
           }
-          console.log(`[Phase 1.5] Using complete cached data for ${item.symbol}: ${item.tech_action_signal}, ¥${item.last_price}`)
+          initialTechnicalData[item.symbol] = techData
+
+          // 同时写入 LocalStorage 缓存，确保 Phase 2 能立即读取
+          setTechnicalCache(item.symbol, techData)
+
+          console.log(`[Phase 1.5] ✅ Loaded from DB & cached: ${item.symbol} (${item.tech_action_signal})`)
         }
       })
 
@@ -378,21 +383,23 @@ export default function PortfolioPage() {
       // 批量加载技术分析数据，避免并发过多
       const aShareItems = portfolio.items.filter(item => /^\d{6}$/.test(item.symbol))
 
-      // 检查缓存数据的完整性（优先检查 technicalData 状态，然后是 LocalStorage）
+      // 检查缓存数据的完整性（优先检查 LocalStorage，然后是 technicalData 状态）
       const hasCompleteCache = (symbol: string) => {
-        // 首先检查 Phase 1.5 已经加载到状态中的数据（从数据库）
+        // 首先检查 LocalStorage 缓存（快速检查，不依赖状态更新顺序）
+        const cached = getTechnicalCache(symbol)
+        if (cached && cached.ma20_status !== "数据加载中..." &&
+                   cached.ma5_status !== "数据加载中..." &&
+                   cached.k_line_pattern !== "数据加载中...") {
+          return true
+        }
+
+        // 然后检查 Phase 1.5 已经加载到状态中的数据（从数据库）
         const stateData = technicalData[symbol]
         if (stateData && stateData.ma20_status !== "未知" && stateData.k_line_pattern !== "未知") {
           return true
         }
 
-        // 然后检查 LocalStorage 缓存
-        const cached = getTechnicalCache(symbol)
-        if (!cached) return false
-        // 检查是否是占位符数据（Phase 1.5 初始化的数据）
-        return cached.ma20_status !== "数据加载中..." &&
-               cached.ma5_status !== "数据加载中..." &&
-               cached.k_line_pattern !== "数据加载中..."
+        return false
       }
 
       // 如果市场未开盘且所有股票都有完整缓存，跳过 API 请求
@@ -417,7 +424,7 @@ export default function PortfolioPage() {
 
       loadInBatches(aShareItems)
     }
-  }, [portfolio, technicalData])
+  }, [portfolio])
 
   // ============================================
   // Action Handlers
