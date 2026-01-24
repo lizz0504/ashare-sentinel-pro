@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect } from "react"
+import React, { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -182,6 +182,9 @@ export default function PortfolioPage() {
   const [showReportModal, setShowReportModal] = useState(false)
   // 新增：强制刷新状态（绕过缓存）
   const [forceRefresh, setForceRefresh] = useState(false)
+  // 使用 ref 保存 forceRefresh 状态，确保 Phase 2 能读取到
+  const forceRefreshRef = useRef(forceRefresh)
+  forceRefreshRef.current = forceRefresh
   // 新增：市场状态提示
   const [marketStatus, setMarketStatus] = useState<{ isOpen: boolean; message: string }>({
     isOpen: false,
@@ -459,26 +462,35 @@ export default function PortfolioPage() {
 
       // 使用批量加载，每次最多 2 个并发
       const loadInBatches = async (items: typeof aShareItems, batchSize = 2) => {
-        console.log(`[Phase 2] 🚀 Loading ${items.length} stocks in batches...`)
+        console.log(`[Phase 2] 🚀 Loading ${items.length} stocks in batches... (forceRefresh=${forceRefreshRef.current})`)
         for (let i = 0; i < items.length; i += batchSize) {
           const batch = items.slice(i, i + batchSize)
           console.log(`[Phase 2] 📦 Batch ${Math.floor(i/batchSize) + 1}:`, batch.map(i => i.symbol))
           await Promise.all(batch.map(item =>
-            loadTechnicalAnalysis(item.symbol, forceRefresh)
+            loadTechnicalAnalysis(item.symbol, forceRefreshRef.current)
           ))
         }
       }
 
       // 如果市场未开盘且所有股票都有完整缓存，跳过 API 请求
+      // 除非用户点击了"刷新全部"按钮（forceRefresh=true）
       if (!isMarketOpen()) {
         const cacheStatus = aShareItems.map(item => ({
           symbol: item.symbol,
           hasCache: hasCompleteCache(item.symbol)
         }))
         console.log("[Phase 2] 📊 Cache status:", cacheStatus)
+        console.log("[Phase 2] 🔄 forceRefresh flag:", forceRefreshRef.current, "(true=force refresh all)")
 
         const allCached = aShareItems.every(item => hasCompleteCache(item.symbol))
         const uncachedSymbols = aShareItems.filter(item => !hasCompleteCache(item.symbol)).map(i => i.symbol)
+
+        // 如果强制刷新所有数据，忽略缓存状态
+        if (forceRefreshRef.current) {
+          console.log("[Phase 2] 🚨 Force refresh requested! Loading all stocks regardless of cache...")
+          loadInBatches(aShareItems)
+          return
+        }
 
         if (allCached) {
           console.log("[Phase 2] ✅ Market closed, using complete cached data for all stocks")
