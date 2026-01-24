@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Market Service - Fetches stock market data using AkShare
-使用 AkShare 获取股票市场数据，支持 A 股、美股和港股
+Market Service - Fetches stock market data using AkShare/Tushare
+使用 AkShare 或 Tushare 获取股票市场数据，支持 A 股、美股和港股
 """
 import os
 import re
@@ -9,8 +9,21 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
-import akshare as ak
 import pandas as pd
+
+# 数据源选择：优先使用 Tushare，降级到 AkShare
+_USE_TUSHARE = False
+_data_fetcher = None
+
+# Always import AkShare as fallback
+import akshare as ak
+
+try:
+    from app.services.data_fetcher import DataFetcher
+    _USE_TUSHARE = True
+    print("[INFO] DataFetcher module available, Tushare support enabled")
+except ImportError:
+    print("[WARN] DataFetcher module not found, using AkShare only")
 
 # ============================================
 # 缓存配置
@@ -39,6 +52,32 @@ try:
 except ImportError:
     _USE_STOCK_DB = False
     print("[WARN] stock_db module not available, using fallback database")
+
+
+# ============================================
+# DataFetcher 初始化
+# ============================================
+def _get_data_fetcher():
+    """获取或创建 DataFetcher 实例"""
+    global _data_fetcher, _USE_TUSHARE
+    if _USE_TUSHARE and _data_fetcher is None:
+        try:
+            # 从配置读取 Tushare Token
+            from app.core.config import settings
+            token = settings.TUSHARE_TOKEN
+
+            if token:
+                _data_fetcher = DataFetcher(token=token)
+                print("[INFO] Using Tushare Pro data source")
+            else:
+                print("[WARN] TUSHARE_TOKEN not set, falling back to AkShare")
+                _USE_TUSHARE = False
+                import akshare as ak
+        except Exception as e:
+            print(f"[WARN] Failed to initialize DataFetcher: {e}, falling back to AkShare")
+            _USE_TUSHARE = False
+            import akshare as ak
+    return _data_fetcher
 
 
 # 本地股票数据库（常见股票）
@@ -133,21 +172,34 @@ def _get_realtime_price(symbol: str, market: str) -> Optional[float]:
             # A股实时行情 - 使用历史数据接口获取最新价格
             print(f"[INFO] Fetching realtime price for A-share {symbol}...")
             end_date = datetime.now()
+            end_str = end_date.strftime('%Y-%m-%d')
 
-            end_str = end_date.strftime('%Y%m%d')
-
-            hist_df = _retry_akshare_call(
-                ak.stock_zh_a_hist,
-                symbol=symbol,
-                period="daily",
-                end_date=end_str,
-                adjust="",
-                max_retries=2
-            )
-            if hist_df is not None and not hist_df.empty:
-                price = float(hist_df.iloc[-1]['收盘'])
-                print(f"[OK] {symbol} realtime price: {price}")
-                return price
+            if _USE_TUSHARE:
+                # 使用 Tushare
+                fetcher = _get_data_fetcher()
+                if fetcher:
+                    hist_df = fetcher.get_stock_daily(
+                        symbol=symbol,
+                        end_date=end_str
+                    )
+                    if hist_df is not None and not hist_df.empty:
+                        price = float(hist_df.iloc[-1]['收盘'])
+                        print(f"[OK] {symbol} realtime price: {price}")
+                        return price
+            else:
+                # 使用 AkShare
+                hist_df = _retry_akshare_call(
+                    ak.stock_zh_a_hist,
+                    symbol=symbol,
+                    period="daily",
+                    end_date=end_date.strftime('%Y%m%d'),
+                    adjust="",
+                    max_retries=2
+                )
+                if hist_df is not None and not hist_df.empty:
+                    price = float(hist_df.iloc[-1]['收盘'])
+                    print(f"[OK] {symbol} realtime price: {price}")
+                    return price
 
         elif market == 'US':
             # 美股暂不支持实时
@@ -167,7 +219,7 @@ def _get_realtime_price(symbol: str, market: str) -> Optional[float]:
 
 def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
     """
-    从AkShare获取股票详细信息（包括行业）
+    从Tushare/AkShare获取股票详细信息（包括行业）
 
     Returns:
         {
@@ -177,6 +229,17 @@ def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
         }
     """
     try:
+        # 优先使用 Tushare
+        if _USE_TUSHARE:
+            fetcher = _get_data_fetcher()
+            if fetcher:
+                print(f"[INFO] Fetching stock details from Tushare for {symbol}...")
+                result = fetcher.get_stock_info(symbol)
+                if result:
+                    print(f"[OK] Got stock details from Tushare: {result.get('name')}, industry={result.get('industry')}, sector={result.get('sector')}")
+                    return result
+
+        # 降级到 AkShare
         print(f"[INFO] Fetching stock details from AkShare for {symbol}...")
         # 使用 stock_individual_info_em 获取个股信息
         info_df = ak.stock_individual_info_em(symbol=symbol)
@@ -243,7 +306,7 @@ def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
                 "sector": sector
             }
     except Exception as e:
-        print(f"[WARN] Failed to fetch stock details from AkShare: {e}")
+        print(f"[WARN] Failed to fetch stock details: {e}")
         import traceback
         traceback.print_exc()
 
@@ -352,19 +415,47 @@ def get_weekly_performance(symbol: str, days: int = 7) -> Optional[Dict]:
     start_date = end_date - timedelta(days=days + 10)
 
     try:
-        start_str = start_date.strftime('%Y%m%d')
-        end_str = end_date.strftime('%Y%m%d')
+        if _USE_TUSHARE:
+            # 使用 Tushare
+            fetcher = _get_data_fetcher()
+            if fetcher:
+                start_str = start_date.strftime('%Y-%m-%d')
+                end_str = end_date.strftime('%Y-%m-%d')
+                print(f"[DEBUG] Calling Tushare for {normalized_symbol}...")
 
-        print(f"[DEBUG] Calling ak.stock_zh_a_hist({normalized_symbol}, {start_str}, {end_str})...")
+                hist_df = fetcher.get_stock_daily(
+                    symbol=normalized_symbol,
+                    start_date=start_str,
+                    end_date=end_str
+                )
+            else:
+                # 降级到 AkShare
+                start_str = start_date.strftime('%Y%m%d')
+                end_str = end_date.strftime('%Y%m%d')
+                print(f"[DEBUG] Calling AkShare for {normalized_symbol}...")
 
-        hist_df = _retry_akshare_call(
-            ak.stock_zh_a_hist,
-            symbol=normalized_symbol,
-            period="daily",
-            start_date=start_str,
-            end_date=end_str,
-            adjust="qfq"
-        )
+                hist_df = _retry_akshare_call(
+                    ak.stock_zh_a_hist,
+                    symbol=normalized_symbol,
+                    period="daily",
+                    start_date=start_str,
+                    end_date=end_str,
+                    adjust="qfq"
+                )
+        else:
+            # 只使用 AkShare
+            start_str = start_date.strftime('%Y%m%d')
+            end_str = end_date.strftime('%Y%m%d')
+            print(f"[DEBUG] Calling AkShare for {normalized_symbol}...")
+
+            hist_df = _retry_akshare_call(
+                ak.stock_zh_a_hist,
+                symbol=normalized_symbol,
+                period="daily",
+                start_date=start_str,
+                end_date=end_str,
+                adjust="qfq"
+            )
 
         if hist_df is None or hist_df.empty or len(hist_df) < 2:
             print(f"[WARN] Insufficient data for {symbol}")
@@ -443,23 +534,53 @@ def get_market_sentiment() -> Optional[Dict]:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=90)  # 获取60个交易日左右
 
-        start_str = start_date.strftime('%Y%m%d')
-        end_str = end_date.strftime('%Y%m%d')
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
 
         print(f"[INFO] Fetching CSI 300 data for sentiment analysis...")
 
-        # 获取沪深300历史数据（带重试）
-        hist_df = _retry_akshare_call(
-            ak.index_zh_a_hist,
-            symbol="000300",
-            period="daily",
-            start_date=start_str,
-            end_date=end_str
-        )
+        # 获取沪深300历史数据
+        hist_df = None
+        if _USE_TUSHARE:
+            fetcher = _get_data_fetcher()
+            if fetcher:
+                try:
+                    hist_df = fetcher.get_index_daily(
+                        symbol="000300",
+                        start_date=start_str,
+                        end_date=end_str
+                    )
+                    print("[INFO] Using Tushare Pro data source for index")
+                except Exception as e:
+                    print(f"[WARN] Tushare index data fetch failed: {e}, falling back to AkShare")
+                    hist_df = None
 
+        # 如果 Tushare 失败或未启用，使用 AkShare
+        if hist_df is None:
+            print("[INFO] Using AkShare as fallback for index data")
+            try:
+                hist_df = _retry_akshare_call(
+                    ak.index_zh_a_hist,
+                    symbol="000300",
+                    period="daily",
+                    start_date=start_date.strftime('%Y%m%d'),
+                    end_date=end_date.strftime('%Y%m%d')
+                )
+            except Exception as e:
+                print(f"[WARN] AkShare index data fetch also failed: {e}")
+                hist_df = None
+
+        # 如果两种数据源都失败，返回中性默认值
         if hist_df is None or hist_df.empty or len(hist_df) < 60:
-            print(f"[WARN] Insufficient CSI 300 data")
-            return None
+            print(f"[WARN] Insufficient CSI 300 data from all sources, using neutral default")
+            # 返回中性默认值
+            return {
+                "score": 50.0,
+                "label": "中性 (数据暂不可用)",
+                "rsi": 50.0,
+                "date": datetime.now().strftime('%Y-%m-%d'),
+                "data_source": "default"
+            }
 
         hist_df = hist_df.sort_values('日期')
 
@@ -545,31 +666,67 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=45)  # 获取30个交易日左右
 
-        start_str = start_date.strftime('%Y%m%d')
-        end_str = end_date.strftime('%Y%m%d')
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
 
         print(f"[INFO] Fetching technical data for {symbol}...")
 
-        # 获取个股数据（带重试）
-        stock_df = _retry_akshare_call(
-            ak.stock_zh_a_hist,
-            symbol=normalized_symbol,
-            start_date=start_str,
-            end_date=end_str
-        )
-
-        # 获取沪深300作为基准（带重试）
-        try:
-            index_df = _retry_akshare_call(
-                ak.index_zh_a_hist,
-                symbol="000300",
-                period="daily",
-                start_date=start_str,
-                end_date=end_str
+        # 获取个股数据
+        if _USE_TUSHARE:
+            fetcher = _get_data_fetcher()
+            if fetcher:
+                stock_df = fetcher.get_stock_daily(
+                    symbol=normalized_symbol,
+                    start_date=start_str,
+                    end_date=end_str
+                )
+                # 获取沪深300作为基准
+                try:
+                    index_df = fetcher.get_index_daily(
+                        symbol="000300",
+                        start_date=start_str,
+                        end_date=end_str
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to fetch index data: {e}")
+                    index_df = None
+            else:
+                # 降级到 AkShare
+                stock_df = _retry_akshare_call(
+                    ak.stock_zh_a_hist,
+                    symbol=normalized_symbol,
+                    start_date=start_date.strftime('%Y%m%d'),
+                    end_date=end_date.strftime('%Y%m%d')
+                )
+                try:
+                    index_df = _retry_akshare_call(
+                        ak.index_zh_a_hist,
+                        symbol="000300",
+                        period="daily",
+                        start_date=start_date.strftime('%Y%m%d'),
+                        end_date=end_date.strftime('%Y%m%d')
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to fetch index data: {e}")
+                    index_df = None
+        else:
+            stock_df = _retry_akshare_call(
+                ak.stock_zh_a_hist,
+                symbol=normalized_symbol,
+                start_date=start_date.strftime('%Y%m%d'),
+                end_date=end_date.strftime('%Y%m%d')
             )
-        except Exception as e:
-            print(f"[WARN] Failed to fetch index data: {e}")
-            index_df = None
+            try:
+                index_df = _retry_akshare_call(
+                    ak.index_zh_a_hist,
+                    symbol="000300",
+                    period="daily",
+                    start_date=start_date.strftime('%Y%m%d'),
+                    end_date=end_date.strftime('%Y%m%d')
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to fetch index data: {e}")
+                index_df = None
 
         if stock_df is None or stock_df.empty or len(stock_df) < 20:
             print(f"[WARN] Insufficient data for {symbol}")

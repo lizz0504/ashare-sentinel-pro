@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str | None = None
 
     # --------------------------------------------
+    # Tushare Pro Configuration
+    # --------------------------------------------
+    TUSHARE_TOKEN: str | None = None
+
+    # --------------------------------------------
     # Application Settings
     # --------------------------------------------
     PORT: int = 8000
