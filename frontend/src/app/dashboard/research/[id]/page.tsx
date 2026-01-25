@@ -77,7 +77,7 @@ export default function ReportChatPage() {
 
     try {
       console.log("[DEBUG] Fetching from backend...")
-      const response = await fetch("http://localhost:8003/api/v1/chat", {
+      const response = await fetch("http://localhost:8000/api/v1/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

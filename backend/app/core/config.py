@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str | None = None
 
     # --------------------------------------------
+    # Tushare Pro Configuration
+    # --------------------------------------------
+    TUSHARE_TOKEN: str | None = None
+    DISABLE_TUSHARE: bool = False  # 完全禁用 Tushare，只使用 AkShare
+
+    # --------------------------------------------
     # Application Settings
     # --------------------------------------------
     PORT: int = 8000
