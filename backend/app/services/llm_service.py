@@ -5,7 +5,7 @@ LLM Service - AI-Powered Report Summarization & Chat
 """
 
 import json
-import os
+import logging
 from typing import Dict, List, Optional
 
 import dashscope
@@ -13,6 +13,8 @@ from supabase import Client
 
 from app.core.config import settings
 from app.core.db import get_db_client
+
+logger = logging.getLogger(__name__)
 
 
 # 本地分类映射（当 AI 失败时使用）
@@ -79,7 +81,7 @@ def generate_summary(report_id: str) -> str | None:
         print(f"[OK] Analyzing {len(text_to_analyze)} characters from {len(chunks_result.data)} chunks")
 
         # 调用通义千问 API
-        api_key = settings.DASHSCOPE_API_KEY or os.getenv("DASHSCOPE_API_KEY")
+        api_key = settings.DASHSCOPE_API_KEY
         if not api_key:
             print("[ERROR] DASHSCOPE_API_KEY not found")
             return None
@@ -120,7 +122,7 @@ def generate_summary(report_id: str) -> str | None:
 
 def create_embedding(text: str) -> List[float] | None:
     """使用阿里云 text-embedding-v1 模型生成文本向量嵌入"""
-    api_key = settings.DASHSCOPE_API_KEY or os.getenv("DASHSCOPE_API_KEY")
+    api_key = settings.DASHSCOPE_API_KEY
 
     if not api_key:
         print("[ERROR] DASHSCOPE_API_KEY not found")
@@ -213,7 +215,7 @@ def generate_chat_response(
             print(f"[OK] Retrieved {len(match_result.data)} relevant chunks")
 
         # 使用 Qwen 生成回答
-        api_key = settings.DASHSCOPE_API_KEY or os.getenv("DASHSCOPE_API_KEY")
+        api_key = settings.DASHSCOPE_API_KEY
         if not api_key:
             print("[ERROR] DASHSCOPE_API_KEY not found")
             return None
@@ -259,7 +261,7 @@ def classify_stock(symbol: str, name: str, sector_en: str, industry_en: str) -> 
     """
     print(f"[DEBUG] classify_stock called: symbol={symbol}, sector_en={sector_en}, industry_en={industry_en}")
 
-    api_key = settings.DASHSCOPE_API_KEY or os.getenv("DASHSCOPE_API_KEY")
+    api_key = settings.DASHSCOPE_API_KEY
 
     # 1. 先尝试本地映射（快速且可靠）
     local_result = _get_local_classification(sector_en, industry_en)
@@ -359,7 +361,7 @@ def generate_portfolio_review(
             "quote": "投资名言"
         }
     """
-    api_key = settings.DASHSCOPE_API_KEY or os.getenv("DASHSCOPE_API_KEY")
+    api_key = settings.DASHSCOPE_API_KEY
 
     direction = "上漲" if price_change_pct > 0 else "下跌"
 

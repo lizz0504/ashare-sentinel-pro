@@ -34,12 +34,15 @@ class Settings(BaseSettings):
     # --------------------------------------------
     OPENAI_API_KEY: str | None = None
     DASHSCOPE_API_KEY: str | None = None
+    DEEPSEEK_API_KEY: str | None = None
+    ZHIPU_API_KEY: str | None = None
 
     # --------------------------------------------
     # Tushare Pro Configuration
     # --------------------------------------------
     TUSHARE_TOKEN: str | None = None
     DISABLE_TUSHARE: bool = False  # 完全禁用 Tushare，只使用 AkShare
+    PREFER_BAOSTOCK: bool = True  # 优先使用 Baostock 而非 Tushare
 
     # --------------------------------------------
     # Application Settings

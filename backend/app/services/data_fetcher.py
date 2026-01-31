@@ -3,12 +3,14 @@
 DataFetcher - Tushare Pro 数据获取类
 封装 Tushare Pro 接口，提供 AkShare 兼容的数据格式
 """
-import os
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict
+
 import pandas as pd
 import tushare as ts
+
+from app.core.config import settings
 
 
 class DataFetcher:
@@ -22,11 +24,11 @@ class DataFetcher:
         初始化 DataFetcher
 
         Args:
-            token: Tushare Pro API token
+            token: Tushare Pro API token (可选，默认使用配置文件中的token)
         """
-        self.token = token or os.getenv("TUSHARE_TOKEN")
+        self.token = token or settings.TUSHARE_TOKEN
         if not self.token:
-            raise ValueError("Tushare token not provided")
+            raise ValueError("Tushare token not found in settings")
 
         # 初始化 Tushare
         ts.set_token(self.token)

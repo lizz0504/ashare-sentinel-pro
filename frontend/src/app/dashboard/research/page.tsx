@@ -38,7 +38,13 @@ export default function ResearchPage() {
         .select("*")
         .order("uploaded_at", { ascending: false })
 
-      if (error) throw error
+      if (error) {
+        console.error("[Supabase Error] Code:", error.code)
+        console.error("[Supabase Error] Message:", error.message)
+        console.error("[Supabase Error] Details:", error.details)
+        console.error("[Supabase Error] Hint:", error.hint)
+        throw error
+      }
       setReports(data || [])
     } catch (error) {
       console.error("Error loading reports:", error)
@@ -95,7 +101,7 @@ export default function ResearchPage() {
 
       console.log("[DEBUG] 开始上传:", selectedFile.name, selectedFile.size)
 
-      const response = await fetch("http://localhost:8000/api/v1/analyze/upload", {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8004"}/api/v1/analyze/upload`, {
         method: "POST",
         body: formData,
       })

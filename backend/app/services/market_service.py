@@ -11,25 +11,57 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-# 数据源选择：优先使用 Tushare，降级到 AkShare
+# 数据源选择：优先使用 Baostock，降级到 AkShare
+_USE_BAOSTOCK = True
 _USE_TUSHARE = False
 _data_fetcher = None
 
 # Always import AkShare as fallback
 import akshare as ak
 
+# Import Baostock for A-share data
+try:
+    from app.services.market_service_baostock import get_financials_baostock
+    _BAOSTOCK_AVAILABLE = True
+except ImportError:
+    _BAOSTOCK_AVAILABLE = False
+
+# 禁用代理，避免网络连接问题
+os.environ['HTTP_PROXY'] = ''
+os.environ['HTTPS_PROXY'] = ''
+os.environ['http_proxy'] = ''
+os.environ['https_proxy'] = ''
+os.environ['NO_PROXY'] = '*'
+
+# 禁用 requests 库的代理
+try:
+    import requests
+    # 备份原始的 Session.request 方法
+    _original_request = requests.Session.request
+
+    # 创建新的方法，强制禁用代理
+    def _request_no_proxy(self, method, url, *args, **kwargs):
+        kwargs.setdefault('proxies', {})
+        return _original_request(self, method, url, *args, **kwargs)
+
+    # 替换 Session.request 方法
+    requests.Session.request = _request_no_proxy
+    print("[INFO] Disabled proxy for requests library")
+except Exception as e:
+    print(f"[WARN] Failed to disable proxy: {e}")
+
 # 检查是否完全禁用 Tushare
 try:
     from app.core.config import settings
     if getattr(settings, 'DISABLE_TUSHARE', False):
         _USE_TUSHARE = False
-        print("[DATA SOURCE] 📈 Tushare disabled by configuration (DISABLE_TUSHARE=True)")
+        print("[DATA SOURCE] Tushare disabled by configuration (DISABLE_TUSHARE=True)")
     else:
         from app.services.data_fetcher import DataFetcher
         _USE_TUSHARE = True
-        print("[DATA SOURCE] 🔍 DataFetcher module found - Tushare Pro support available")
+        print("[DATA SOURCE] DataFetcher module found - Tushare Pro support available")
 except ImportError:
-    print("[DATA SOURCE] 📈 DataFetcher module not found - will use AkShare only")
+    print("[DATA SOURCE] DataFetcher module not found - will use AkShare only")
 
 # ============================================
 # 缓存配置
@@ -74,14 +106,14 @@ def _get_data_fetcher():
 
             if token:
                 _data_fetcher = DataFetcher(token=token)
-                print("[DATA SOURCE] ✅ Tushare Pro initialized successfully (Token configured)")
+                print("[DATA SOURCE] Tushare Pro initialized successfully (Token configured)")
             else:
-                print("[DATA SOURCE] ⚠️  TUSHARE_TOKEN not set in environment, falling back to AkShare")
+                print("[DATA SOURCE] TUSHARE_TOKEN not set in environment, falling back to AkShare")
                 _USE_TUSHARE = False
                 import akshare as ak
         except Exception as e:
-            print(f"[DATA SOURCE] ❌ Failed to initialize Tushare Pro: {e}")
-            print(f"[DATA SOURCE] 📈 Falling back to AkShare")
+            print(f"[DATA SOURCE] Failed to initialize Tushare Pro: {e}")
+            print(f"[DATA SOURCE] Falling back to AkShare")
             _USE_TUSHARE = False
             import akshare as ak
     return _data_fetcher
@@ -89,7 +121,14 @@ def _get_data_fetcher():
 
 # 本地股票数据库（常见股票）
 _STOCK_DATABASE = {
-    # A 股
+    # A 股 - 科创板 (688xxx)
+    '688008': {'name': '澜起科技', 'sector': '科技', 'industry': '半导体'},
+    '688012': {'name': '澳华内镜', 'sector': '医疗健康', 'industry': '医疗器械'},
+    '688981': {'name': '中芯国际', 'sector': '科技', 'industry': '半导体'},
+    '688036': {'name': '传音控股', 'sector': '科技', 'industry': '消费电子'},
+    '688111': {'name': '金山办公', 'sector': '科技', 'industry': '软件'},
+    '688599': {'name': '天合光能', 'sector': '新能源', 'industry': '光伏'},
+    # A 股 - 主板
     '600519': {'name': '贵州茅台', 'sector': '消费品', 'industry': '白酒'},
     '000858': {'name': '五粮液', 'sector': '消费品', 'industry': '白酒'},
     '600036': {'name': '招商银行', 'sector': '金融', 'industry': '银行'},
@@ -112,9 +151,9 @@ _STOCK_DATABASE = {
     '002475': {'name': '立讯精密', 'sector': '科技', 'industry': '消费电子'},
     '002028': {'name': '索菲亚', 'sector': '消费品', 'industry': '家居'},
     '600584': {'name': '长电科技', 'sector': '科技', 'industry': '半导体'},
-    '300124': {'name': '汇川技术', 'sector': '工業', 'industry': '自动化'},
-    '601390': {'name': '中国中铁', 'sector': '工業', 'industry': '基建'},
-    '601766': {'name': '中国中车', 'sector': '工業', 'industry': '轨道交通'},
+    '300124': {'name': '汇川技术', 'sector': '工业', 'industry': '自动化'},
+    '601390': {'name': '中国中铁', 'sector': '工业', 'industry': '基建'},
+    '601766': {'name': '中国中车', 'sector': '工业', 'industry': '轨道交通'},
     # 美股
     'AAPL': {'name': 'Apple Inc.', 'sector': '科技', 'industry': 'Technology'},
     'MSFT': {'name': 'Microsoft', 'sector': '科技', 'industry': 'Software'},
@@ -675,18 +714,146 @@ def get_market_sentiment() -> Optional[Dict]:
         return None
 
 
+def _get_baostock_data(symbol: str, start_date, end_date):
+    """从 Baostock 获取股票数据"""
+    try:
+        from app.services.market_service_baostock import get_financials_baostock
+        import baostock as bs
+
+        # 登录
+        bs.login()
+
+        # 标准化股票代码
+        market = 'sh' if symbol.startswith('6') else 'sz'
+        bs_symbol = f"{market}.{symbol}"
+
+        # 获取历史数据
+        rs = bs.query_history_k_data_plus(
+            bs_symbol,
+            fields="date,code,open,close,high,low,volume",
+            start_date=start_date.strftime('%Y-%m-%d'),
+            end_date=end_date.strftime('%Y-%m-%d'),
+            frequency="d",
+            adjustflag="3"
+        )
+
+        data_list = []
+        while (rs.error_code == '0') & rs.next():
+            data_list.append(rs.get_row_data())
+
+        bs.logout()
+
+        if not data_list:
+            return None
+
+        # 转换为 DataFrame
+        import pandas as pd
+        df = pd.DataFrame(data_list)
+        df.columns = ['日期', '代码', '开盘', '收盘', '最高', '最低', '成交量']
+        df['日期'] = pd.to_datetime(df['日期'])
+        for col in ['开盘', '收盘', '最高', '最低', '成交量']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        return df
+    except Exception as e:
+        print(f"[WARN] Baostock data fetch failed: {e}")
+        return None
+
+
+def _get_akshare_data(symbol, start_date, end_date):
+    """从 AkShare 获取股票和指数数据"""
+    try:
+        # 标准化股票代码
+        market = _detect_market_type(symbol)
+        normalized_symbol = _normalize_symbol(symbol, market)
+
+        # 获取个股数据
+        stock_df = _retry_akshare_call(
+            ak.stock_zh_a_hist,
+            symbol=normalized_symbol,
+            start_date=start_date.strftime('%Y%m%d'),
+            end_date=end_date.strftime('%Y%m%d')
+        )
+
+        # 获取沪深300作为基准
+        try:
+            index_df = _retry_akshare_call(
+                ak.index_zh_a_hist,
+                symbol="000300",
+                period="daily",
+                start_date=start_date.strftime('%Y%m%d'),
+                end_date=end_date.strftime('%Y%m%d')
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to fetch index data: {e}")
+            index_df = None
+
+        return stock_df, index_df
+    except Exception as e:
+        print(f"[ERROR] AkShare data fetch failed: {e}")
+        return None, None
+
+
+def _try_tushare_data(symbol, start_date, end_date):
+    """尝试使用 Tushare 获取数据，失败则降级到 AkShare"""
+    try:
+        fetcher = _get_data_fetcher()
+        if fetcher:
+            print(f"[DATA SOURCE] Using Tushare Pro for {symbol}")
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
+
+            # 获取个股数据
+            stock_df = fetcher.get_stock_daily(
+                symbol=_normalize_symbol(symbol, _detect_market_type(symbol)),
+                start_date=start_str,
+                end_date=end_str
+            )
+
+            # 获取沪深300作为基准
+            try:
+                print(f"[DATA SOURCE] Using Tushare Pro for index 000300 (HS300)")
+                index_df = fetcher.get_index_daily(
+                    symbol="000300",
+                    start_date=start_str,
+                    end_date=end_str
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to fetch index data from Tushare: {e}")
+                index_df = None
+
+            if stock_df is not None and not stock_df.empty:
+                return stock_df, index_df
+            else:
+                raise Exception("Tushare returned empty data")
+        else:
+            raise Exception("Tushare not available")
+    except Exception as e:
+        print(f"[WARN] Tushare failed, falling back to AkShare: {e}")
+        return _get_akshare_data(symbol, start_date, end_date)
+
+
 def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
     """
-    获取个股技术分析
+    Sentinel Ultra 技术分析 - 引入市场微观结构和筹码分布概念
 
     Returns:
         {
             "symbol": str,
+            "current_price": float,
             "ma20_status": "站上均线" | "跌破均线",
             "volume_status": "放量" | "缩量" | "持平",
             "volume_change_pct": float,
-            "alpha": float,  # 相对沪深300的超额收益
+            "alpha": float,
             "health_score": 0-100,
+            "vwap_20": float,           # 20日VWAP (筹码成本)
+            "bollinger_upper": float,    # 布林带上轨
+            "bollinger_middle": float,   # 布林带中轨
+            "bollinger_lower": float,    # 布林带下轨
+            "bandwidth": float,          # 布林带宽度
+            "turnover": float,           # 换手率
+            "rsi_14": float,             # 14日RSI
+            "action_signal": str,
             "date": str
         }
     """
@@ -699,18 +866,29 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
 
     try:
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=45)  # 获取30个交易日左右
+        start_date = end_date - timedelta(days=90)  # 获取更多数据以计算60日均线
 
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
 
         print(f"[INFO] Fetching technical data for {symbol}...")
 
-        # 获取个股数据
-        if _USE_TUSHARE:
+        # 数据源优先级: Baostock → Tushare → AkShare
+        if _BAOSTOCK_AVAILABLE:
+            try:
+                print(f"[DATA SOURCE] Using Baostock for {symbol}")
+                stock_df = _get_baostock_data(symbol, start_date, end_date)
+                if stock_df is not None:
+                    index_df = None  # Baostock 暂不支持指数数据
+                else:
+                    raise Exception("Baostock data fetch failed")
+            except Exception as e:
+                print(f"[WARN] Baostock failed, trying Tushare: {e}")
+                stock_df, index_df = _try_tushare_data(symbol, start_date, end_date)
+        elif _USE_TUSHARE:
             fetcher = _get_data_fetcher()
             if fetcher:
-                print(f"[DATA SOURCE] 📊 Using Tushare Pro for {symbol}")
+                print(f"[DATA SOURCE] Using Tushare Pro for {symbol}")
                 stock_df = fetcher.get_stock_daily(
                     symbol=normalized_symbol,
                     start_date=start_str,
@@ -718,7 +896,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                 )
                 # 获取沪深300作为基准
                 try:
-                    print(f"[DATA SOURCE] 📊 Using Tushare Pro for index 000300 (HS300)")
+                    print(f"[DATA SOURCE] Using Tushare Pro for index 000300 (HS300)")
                     index_df = fetcher.get_index_daily(
                         symbol="000300",
                         start_date=start_str,
@@ -729,7 +907,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                     index_df = None
             else:
                 # 降级到 AkShare
-                print(f"[DATA SOURCE] 📈 Tushare unavailable, falling back to AkShare for {symbol}")
+                print(f"[DATA SOURCE] Tushare unavailable, falling back to AkShare for {symbol}")
                 stock_df = _retry_akshare_call(
                     ak.stock_zh_a_hist,
                     symbol=normalized_symbol,
@@ -737,7 +915,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                     end_date=end_date.strftime('%Y%m%d')
                 )
                 try:
-                    print(f"[DATA SOURCE] 📈 Using AkShare for index 000300 (HS300)")
+                    print(f"[DATA SOURCE] Using AkShare for index 000300 (HS300)")
                     index_df = _retry_akshare_call(
                         ak.index_zh_a_hist,
                         symbol="000300",
@@ -749,43 +927,67 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                     print(f"[WARN] Failed to fetch index data: {e}")
                     index_df = None
         else:
-            print(f"[DATA SOURCE] 📈 Using AkShare for {symbol} (Tushare not enabled)")
-            stock_df = _retry_akshare_call(
-                ak.stock_zh_a_hist,
-                symbol=normalized_symbol,
-                start_date=start_date.strftime('%Y%m%d'),
-                end_date=end_date.strftime('%Y%m%d')
-            )
-            try:
-                print(f"[DATA SOURCE] 📈 Using AkShare for index 000300 (HS300)")
-                index_df = _retry_akshare_call(
-                    ak.index_zh_a_hist,
-                    symbol="000300",
-                    period="daily",
-                    start_date=start_date.strftime('%Y%m%d'),
-                    end_date=end_date.strftime('%Y%m%d')
-                )
-            except Exception as e:
-                print(f"[WARN] Failed to fetch index data: {e}")
-                index_df = None
+            print(f"[DATA SOURCE] Baostock not available, trying Tushare first for {symbol}")
+            stock_df, index_df = _try_tushare_data(symbol, start_date, end_date)
 
-        if stock_df is None or stock_df.empty or len(stock_df) < 20:
+        if stock_df is None or stock_df.empty or len(stock_df) < 60:
             print(f"[WARN] Insufficient data for {symbol}")
             return None
 
-        stock_df = stock_df.sort_values('日期')
+        stock_df = stock_df.sort_values('日期').reset_index(drop=True)
 
-        # 计算MA20和MA5
-        stock_df['MA20'] = stock_df['收盘'].rolling(window=20).mean()
+        # ========================================
+        # 1. 高级指标计算 (使用 Pandas)
+        # ========================================
+
+        # 基础均线
         stock_df['MA5'] = stock_df['收盘'].rolling(window=5).mean()
+        stock_df['MA20'] = stock_df['收盘'].rolling(window=20).mean()
+        stock_df['MA60'] = stock_df['收盘'].rolling(window=60).mean()
 
+        # VWAP (20日成交量加权平均价) - 筹码成本
+        stock_df['VWAP_20'] = (stock_df['收盘'] * stock_df['成交量']).rolling(window=20).sum() / \
+                                stock_df['成交量'].rolling(window=20).sum()
+
+        # Bollinger Bands (20, 2)
+        stock_df['BB_Middle'] = stock_df['收盘'].rolling(window=20).mean()
+        std_20 = stock_df['收盘'].rolling(window=20).std()
+        stock_df['BB_Upper'] = stock_df['BB_Middle'] + 2 * std_20
+        stock_df['BB_Lower'] = stock_df['BB_Middle'] - 2 * std_20
+        stock_df['BB_Width'] = (stock_df['BB_Upper'] - stock_df['BB_Lower']) / stock_df['BB_Middle']
+
+        # RSI (14日)
+        delta = stock_df['收盘'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        stock_df['RSI_14'] = 100 - (100 / (1 + rs))
+
+        # 获取最新数据
         latest = stock_df.iloc[-1]
         current_price = float(latest['收盘'])
-        ma20 = float(latest['MA20'])
+        open_price = float(latest['开盘'])
+        high_price = float(latest['最高'])
+        low_price = float(latest['最低'])
+
         ma5 = float(latest['MA5'])
+        ma20 = float(latest['MA20'])
+        ma60 = float(latest['MA60'])
+        vwap_20 = float(latest['VWAP_20']) if not pd.isna(latest['VWAP_20']) else current_price
+        bb_upper = float(latest['BB_Upper'])
+        bb_middle = float(latest['BB_Middle'])
+        bb_lower = float(latest['BB_Lower'])
+        bandwidth = float(latest['BB_Width'])
+        rsi_14 = float(latest['RSI_14']) if not pd.isna(latest['RSI_14']) else 50
+
+        # 换手率 (如果AkShare数据中包含)
+        turnover = None
+        if '换手率' in stock_df.columns:
+            turnover = float(latest['换手率']) if not pd.isna(latest['换手率']) else None
 
         # 均线状态
         ma20_status = "站上均线" if current_price > ma20 else "跌破均线"
+        ma5_status = "站上MA5" if current_price > ma5 else "跌破MA5"
 
         # 量能分析
         volume_20 = stock_df.tail(20)['成交量'].mean()
@@ -803,62 +1005,99 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
             volume_change_pct = 0
             volume_status = "持平"
 
+        # 价格变化
+        price_change = (current_price - float(stock_df.iloc[-2]['收盘'])) / float(stock_df.iloc[-2]['收盘'])
+
         # Alpha计算（相对沪深300，使用最近5个交易日）
         if index_df is not None and not index_df.empty:
             index_df = index_df.sort_values('日期')
-
-            # 对齐时间范围 - 使用最近5个交易日
             stock_start_price = float(stock_df.iloc[-5]['收盘'])
-            stock_end_price = float(stock_df.iloc[-1]['收盘'])
-
+            stock_end_price = current_price
             index_start_price = float(index_df.iloc[-5]['收盘'])
             index_end_price = float(index_df.iloc[-1]['收盘'])
-
             stock_return = (stock_end_price - stock_start_price) / stock_start_price * 100
             index_return = (index_end_price - index_start_price) / index_start_price * 100
-
             alpha = stock_return - index_return
         else:
             alpha = 0.0
 
-        # 健康评分 (0-100)
-        health_score = 50
+        # ========================================
+        # 2. Sentinel Ultra 评分逻辑 (核心算法)
+        # ========================================
 
-        # MA20状态 (+30 or -30)
-        if ma20_status == "站上均线":
-            health_score += 30
+        health_score = 50  # 基础分
+
+        # --- A. 筹码与成本 (VWAP) [权重 ±15] ---
+        # 逻辑：价格在成本之上=获利盘(支撑)；在成本之下=套牢盘(压力)
+        if current_price > vwap_20:
+            health_score += 15
         else:
-            health_score -= 30
+            health_score -= 15
 
-        # 量能状态 (+20 or -20)
-        if volume_status == "放量":
-            health_score += 20
-        elif volume_status == "缩量":
-            health_score -= 20
+        # --- B. 趋势与均线 (Trend) [权重 ±20] ---
+        # 逻辑：保留 Pro 版的缓冲带逻辑
+        pct_diff_ma20 = (current_price - ma20) / ma20
+        if pct_diff_ma20 > 0.03:
+            health_score += 15
+        elif 0 < pct_diff_ma20 <= 0.03:
+            health_score += 5
+        elif -0.03 <= pct_diff_ma20 <= 0:
+            health_score -= 5
+        else:
+            health_score -= 15
 
-        # Alpha (+50 or -50, 限制在 +/-30)
-        alpha_score = max(-30, min(30, alpha))
-        health_score += alpha_score
+        if current_price > ma60:
+            health_score += 5  # 长期趋势加分
 
+        # --- C. 爆发潜力 (Bollinger Squeeze) [权重 +10] ---
+        # 逻辑：低波动率意味着变盘在即。配合趋势向上是绝佳买点。
+        if bandwidth < 0.15:  # 布林带极度收窄
+            if current_price > ma20:  # 趋势向上且收窄 -> 蓄势待发
+                health_score += 10
+            else:  # 趋势向下且收窄 -> 可能暴跌
+                health_score -= 5
+
+        # --- D. 活跃度 (Turnover) [权重 ±10] ---
+        # 逻辑：拒绝僵尸股，警惕过热股
+        if turnover is not None:
+            if turnover < 1.0:
+                health_score -= 10  # 僵尸股
+            elif 3.0 <= turnover <= 12.0:
+                health_score += 10  # 黄金活跃区
+            elif turnover > 20.0:
+                health_score -= 10  # 情绪过热风险
+
+        # --- E. 量价配合 (Volume) [权重 ±15] ---
+        # 逻辑：保留 Pro 版 (缩量回调是好事)
+        if price_change > 0:
+            if volume_status == "放量":
+                health_score += 15
+            elif volume_status == "缩量":
+                health_score -= 5
+        else:
+            if volume_status == "放量":
+                health_score -= 15
+            elif volume_status == "缩量":
+                health_score += 10  # 惜售/洗盘
+
+        # --- F. 情绪风控 (RSI) [权重 -20 ~ +10] ---
+        if rsi_14 > 80:
+            health_score -= 20  # 超买惩罚
+        elif rsi_14 < 20:
+            health_score += 10  # 超跌奖励
+
+        # Final Clamp
         health_score = max(0, min(100, health_score))
 
-        # ===== K线形态识别 =====
+        # K线形态识别 (保留原逻辑，但权重降低)
         k_line_pattern = "普通震荡"
         pattern_signal = "neutral"
 
-        # 获取最新K线数据
-        open_price = float(latest['开盘'])
-        high_price = float(latest['最高'])
-        low_price = float(latest['最低'])
-        close_price = float(latest['收盘'])
+        body = abs(current_price - open_price)
+        upper_shadow = high_price - max(current_price, open_price)
+        lower_shadow = min(current_price, open_price) - low_price
+        price_range = high_price - low_price
 
-        # 计算K线要素
-        body = abs(close_price - open_price)  # 实体
-        upper_shadow = high_price - max(close_price, open_price)  # 上影线
-        lower_shadow = min(close_price, open_price) - low_price  # 下影线
-        price_range = high_price - low_price  # 振幅
-
-        # 判断趋势（使用前5天数据判断）
         if len(stock_df) >= 6:
             recent_5 = stock_df.iloc[-6:-1]['收盘'].values
             is_downtrend = recent_5[-1] < recent_5[0]
@@ -867,44 +1106,32 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
             is_downtrend = False
             is_uptrend = False
 
-        # 形态识别逻辑
-        # 1. 金针探底 (Hammer) - 下影线长，发生在下跌趋势中
-        if (lower_shadow > 2 * body and lower_shadow > 0.02 * close_price and
-            body < 0.03 * close_price and is_downtrend):
+        # 形态识别 (权重降低到 +/- 5)
+        if (lower_shadow > 2 * body and lower_shadow > 0.02 * current_price and
+            body < 0.03 * current_price and is_downtrend):
             k_line_pattern = "金针探底"
             pattern_signal = "bullish"
-            health_score += 15  # 底部支撑，加分
-
-        # 2. 冲高回落 (Shooting Star) - 上影线长
-        elif (upper_shadow > 2 * body and upper_shadow > 0.02 * close_price and
-              body < 0.03 * close_price):
+            health_score = min(100, health_score + 5)
+        elif (upper_shadow > 2 * body and upper_shadow > 0.02 * current_price and
+              body < 0.03 * current_price):
             k_line_pattern = "冲高回落"
             pattern_signal = "bearish"
-            health_score -= 15  # 顶部压力，减分
-
-        # 3. 变盘十字星 (Doji) - 实体极小
-        elif body < 0.001 * close_price and price_range > 0.01 * close_price:
+            health_score = max(0, health_score - 5)
+        elif body < 0.001 * current_price and price_range > 0.01 * current_price:
             k_line_pattern = "变盘十字星"
             pattern_signal = "warning"
-
-        # 4. 光头大阳线 (Strong Bull) - 大涨，几乎无上影线
-        elif (close_price > open_price and
-              (close_price - open_price) / open_price > 0.03 and
-              upper_shadow < 0.005 * close_price):
+        elif (current_price > open_price and
+              (current_price - open_price) / open_price > 0.03 and
+              upper_shadow < 0.005 * current_price):
             k_line_pattern = "光头大阳线"
             pattern_signal = "bullish"
-            health_score += 10
-
-        # 5. 光脚大阴线 (Strong Bear) - 大跌，几乎无下影线
-        elif (close_price < open_price and
-              (open_price - close_price) / open_price > 0.03 and
-              lower_shadow < 0.005 * close_price):
+            health_score = min(100, health_score + 5)
+        elif (current_price < open_price and
+              (open_price - current_price) / open_price > 0.03 and
+              lower_shadow < 0.005 * current_price):
             k_line_pattern = "光脚大阴线"
             pattern_signal = "bearish"
-            health_score -= 10
-
-        # MA5状态
-        ma5_status = "站上MA5" if current_price > ma5 else "跌破MA5"
+            health_score = max(0, health_score - 5)
 
         # 生成操作建议信号
         if health_score >= 80:
@@ -918,24 +1145,48 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         else:
             action_signal = "STRONG_SELL"
 
-        # 生成AI分析文本
+        # 生成AI分析文本 (增强版，包含新指标)
         analysis_parts = []
-        if ma20_status == "站上均线":
+
+        # 趋势分析
+        if current_price > ma20:
             analysis_parts.append("站上MA20均线")
+            if current_price > vwap_20:
+                analysis_parts.append("高于筹码成本(VWAP)")
         else:
             analysis_parts.append("跌破MA20均线")
+            if current_price < vwap_20:
+                analysis_parts.append("低于筹码成本")
 
+        # 布林带分析
+        if bandwidth < 0.15:
+            if current_price > ma20:
+                analysis_parts.append("布林带收窄蓄势待发")
+            else:
+                analysis_parts.append("布林带收窄需谨慎")
+        elif current_price > bb_upper:
+            analysis_parts.append("突破布林带上轨")
+        elif current_price < bb_lower:
+            analysis_parts.append("跌破布林带下轨")
+
+        # Alpha分析
         if alpha > 3:
             analysis_parts.append(f"显著跑赢大盘(+{alpha:.1f}%)")
         elif alpha < -3:
             analysis_parts.append(f"明显弱于大盘({alpha:.1f}%)")
-        else:
-            analysis_parts.append("与大盘表现相当")
 
-        if volume_status == "放量":
-            analysis_parts.append("量价配合良好")
-        elif volume_status == "缩量":
-            analysis_parts.append("量能萎缩")
+        # RSI分析
+        if rsi_14 > 70:
+            analysis_parts.append("RSI超买警惕回调")
+        elif rsi_14 < 30:
+            analysis_parts.append("RSI超跌可能反弹")
+
+        # 换手率分析
+        if turnover is not None:
+            if turnover < 1:
+                analysis_parts.append("交投冷清")
+            elif turnover > 15:
+                analysis_parts.append("交投过度活跃")
 
         # 根据信号给出建议
         if action_signal in ["STRONG_BUY", "BUY"]:
@@ -947,7 +1198,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
 
         analysis = "，".join(analysis_parts) + "。" + advice
 
-        # 投资名言
+        # 投资名言 (保留)
         quotes = [
             "在别人贪婪时恐惧，在别人恐惧时贪婪。(巴菲特)",
             "时间是优秀企业的朋友。(巴菲特)",
@@ -959,9 +1210,10 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         import random
         quote = random.choice(quotes)
 
-        print(f"[OK] {symbol} Technical: MA20={ma20_status}, MA5={ma5_status}, Pattern={k_line_pattern}, Alpha={alpha:.2f}%")
+        print(f"[OK] {symbol} Sentinel Ultra: Score={health_score}, VWAP={vwap_20:.2f}, "
+              f"BB_Width={bandwidth:.3f}, RSI={rsi_14:.1f}, Turnover={turnover}")
 
-        # 获取日期（确保是字符串格式）
+        # 获取日期
         date_value = latest['日期']
         if isinstance(date_value, str):
             date_str = date_value
@@ -971,8 +1223,9 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         return {
             "symbol": symbol,
             "current_price": round(current_price, 2),
-            "ma20": round(ma20, 2),
             "ma5": round(ma5, 2),
+            "ma20": round(ma20, 2),
+            "ma60": round(ma60, 2),
             "ma20_status": ma20_status,
             "ma5_status": ma5_status,
             "volume_status": volume_status,
@@ -984,6 +1237,14 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
             "action_signal": action_signal,
             "analysis": analysis,
             "quote": quote,
+            # 新增高级指标
+            "vwap_20": round(vwap_20, 2),
+            "bollinger_upper": round(bb_upper, 2),
+            "bollinger_middle": round(bb_middle, 2),
+            "bollinger_lower": round(bb_lower, 2),
+            "bandwidth": round(bandwidth, 4),
+            "turnover": round(turnover, 2) if turnover is not None else None,
+            "rsi_14": round(rsi_14, 2),
             "date": date_str
         }
 
@@ -992,4 +1253,581 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         import traceback
         traceback.print_exc()
         return None
+
+
+# ============================================
+# 市场快照 - 实时财务指标
+# ============================================
+
+def get_market_snapshot(symbol: str) -> Optional[Dict]:
+    """
+    获取股票市场快照数据，包含实时价格和核心财务指标
+
+    专为 A 股设计，支持机构级投资决策
+
+    Args:
+        symbol: A 股代码 (6位数字)
+
+    Returns:
+        {
+            "symbol": str,
+            "current_price": float,
+            "price_change": float,
+            "price_change_pct": float,
+            "fundamentals": {
+                "pe_ttm": float,          # 市盈率-TTM
+                "pb": float,              # 市净率
+                "total_mv": float,        # 总市值(亿元)
+                "turnover": float,        # 换手率(%)
+                "roe": float,             # ROE估算(%)
+                "volume_ratio": float     # 量比
+            }
+        }
+    """
+    market = _detect_market_type(symbol)
+    normalized_symbol = _normalize_symbol(symbol, market)
+
+    if market != 'A':
+        print(f"[WARN] Market snapshot only supports A-shares, not {market}")
+        return None
+
+    try:
+        print(f"[INFO] Fetching market snapshot for {symbol}...")
+
+        # 获取实时行情数据
+        spot_info = _retry_akshare_call(ak.stock_zh_a_spot_em, timeout=10)
+
+        if spot_info is None or spot_info.empty:
+            print(f"[WARN] Failed to fetch spot data for {symbol}")
+            return None
+
+        stock_info = spot_info[spot_info['代码'] == normalized_symbol]
+
+        if stock_info.empty:
+            print(f"[WARN] Symbol {symbol} not found in spot data")
+            return None
+
+        stock_row = stock_info.iloc[0]
+
+        # 基础价格数据
+        current_price = _safe_float(stock_row.get('最新价', 0))
+        price_change = _safe_float(stock_row.get('涨跌幅', 0))
+
+        # 计算涨跌额
+        open_price = _safe_float(stock_row.get('今开', 0))
+        if open_price and open_price > 0:
+            price_change_amt = current_price - open_price
+        else:
+            price_change_amt = 0
+
+        # 获取个股财务指标
+        fundamentals = {}
+
+        try:
+            pe_ttm = _safe_float(stock_row.get('市盈率-动态', 0))
+            pb = _safe_float(stock_row.get('市净率', 0))
+            total_mv_raw = _safe_float(stock_row.get('总市值', 0))
+            turnover = _safe_float(stock_row.get('换手率', 0))
+            volume_ratio = _safe_float(stock_row.get('量比', 1))
+
+            # 转换市值单位: 元 → 亿元
+            total_mv = (total_mv_raw / 100000000) if total_mv_raw else 0
+
+            # 简单的 ROE 估算: PB / PE * 100
+            roe = (pb / pe_ttm * 100) if pe_ttm and pe_ttm > 0 else 0
+
+            fundamentals = {
+                "pe_ttm": round(pe_ttm, 2) if pe_ttm else None,
+                "pb": round(pb, 2) if pb else None,
+                "total_mv": round(total_mv, 2) if total_mv else None,
+                "turnover": round(turnover, 2) if turnover else None,
+                "roe": round(roe, 2) if roe else None,
+                "volume_ratio": round(volume_ratio, 2) if volume_ratio else None
+            }
+
+            print(f"[OK] {symbol} PE:{pe_ttm} PB:{pb} MV:{total_mv}亿 ROE:{roe:.2f}%")
+
+        except Exception as e:
+            print(f"[WARN] Failed to extract fundamentals for {symbol}: {e}")
+            fundamentals = {"error": "数据缺失"}
+
+        result = {
+            "symbol": symbol.upper(),
+            "current_price": round(current_price, 2) if current_price else None,
+            "price_change": round(price_change_amt, 2),
+            "price_change_pct": round(price_change, 2) if price_change else 0,
+            "fundamentals": fundamentals,
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+        return result
+
+    except Exception as e:
+        print(f"[ERROR] Failed to get market snapshot for {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# ============================================
+# 新闻标题获取 - 支持全脑协同分析
+# ============================================
+
+def get_news_titles(symbol: str, limit: int = 5) -> list:
+    """
+    获取股票相关新闻标题
+
+    Args:
+        symbol: A股代码
+        limit: 返回数量
+
+    Returns:
+        新闻标题列表
+    """
+    try:
+        # 使用AkShare获取股票新闻
+        news_data = _retry_akshare_call(
+            lambda: ak.stock_news_em(symbol=symbol),
+            timeout=10
+        )
+        if news_data is not None and not news_data.empty:
+            return news_data['新闻标题'].head(limit).tolist()
+    except Exception as e:
+        print(f"[WARN] Failed to get news for {symbol}: {e}")
+
+    return []
+
+
+# ============================================
+# 财务指标分析 - 支持 AI 投委会
+# ============================================
+
+def calculate_financial_metrics(symbol: str) -> Dict:
+    """
+    计算股票的硬核财务指标，为 AI 投委会提供数据支撑
+
+    支持 A 股财务指标计算：
+    - Warren Buffett (价值因子): ROE, Debt-to-Equity, FCF Yield
+    - Cathie Wood (成长因子): Revenue Growth CAGR, PEG, R&D Intensity
+    - Jim Simons (动量因子): RSI(14), Beta
+
+    Args:
+        symbol: A 股代码 (6位数字)
+
+    Returns:
+        {
+            "symbol": str,
+            "market": str,
+            "metrics": {
+                # 价值因子
+                "roe": float | None,
+                "debt_to_equity": float | None,
+                "fcf_yield": float | None,
+                "pe_ratio": float | None,
+                "pb_ratio": float | None,
+                # 成长因子
+                "revenue_growth_cagr": float | None,
+                "peg_ratio": float | None,
+                "rd_intensity": float | None,
+                # 动量因子
+                "rsi_14": float | None,
+                "beta": float | None,
+                "volatility": float | None,
+            },
+            "context": str,  # 格式化的文本上下文，直接喂给 LLM
+        }
+    """
+    market = _detect_market_type(symbol)
+    normalized_symbol = _normalize_symbol(symbol, market)
+
+    if market != 'A':
+        print(f"[WARN] Financial metrics only supports A-shares, not {market}")
+        return {
+            "symbol": symbol.upper(),
+            "market": market,
+            "metrics": {},
+            "context": f"Financial metrics not available for {market} stocks."
+        }
+
+    try:
+        print(f"[INFO] Calculating financial metrics for {symbol}...")
+
+        # ============================================
+        # 1. 获取价格数据 (用于 PE, P/B, RSI, Beta, Volatility)
+        # ============================================
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=120)  # 获取足够的历史数据
+        start_str = start_date.strftime('%Y%m%d')
+        end_str = end_date.strftime('%Y%m%d')
+
+        stock_df = _retry_akshare_call(
+            ak.stock_zh_a_hist,
+            symbol=normalized_symbol,
+            period="daily",
+            start_date=start_str,
+            end_date=end_str
+        )
+
+        if stock_df is None or stock_df.empty or len(stock_df) < 20:
+            print(f"[WARN] Insufficient price data for {symbol}")
+            return _build_financial_fallback(symbol, market, "Insufficient price data")
+
+        stock_df = stock_df.sort_values('日期')
+
+        # 获取沪深300数据 (用于计算 Beta)
+        index_df = _retry_akshare_call(
+            ak.index_zh_a_hist,
+            symbol="000300",
+            period="daily",
+            start_date=start_str,
+            end_date=end_str
+        )
+
+        # ============================================
+        # 2. 获取基本面数据 (AkShare 财务接口)
+        # ============================================
+        fundamental_data = {}
+
+        try:
+            # 获取个股信息 (包含 PE, PB)
+            stock_info = ak.stock_zh_a_spot_em()
+            if stock_info is not None and not stock_info.empty:
+                stock_row = stock_info[stock_info['代码'] == normalized_symbol]
+                if not stock_row.empty:
+                    fundamental_data['pe_ratio'] = _safe_float(stock_row.iloc[0].get('市盈率-动态', None))
+                    fundamental_data['pb_ratio'] = _safe_float(stock_row.iloc[0].get('市净率', None))
+                    fundamental_data['market_cap'] = _safe_float(stock_row.iloc[0].get('总市值', None))
+        except Exception as e:
+            print(f"[WARN] Failed to fetch spot data: {e}")
+
+        try:
+            # 获取财务数据 (ROE, 负债率, 研发投入等)
+            # AkShare 财务接口: ak.stock_financial_analysis_indicator_em
+            financial_df = ak.stock_financial_analysis_indicator_em(symbol=normalized_symbol)
+            if financial_df is not None and not financial_df.empty:
+                # 获取最新一期的财务数据
+                latest = financial_df.iloc[0]
+                fundamental_data['roe'] = _safe_float(latest.get('净资产收益率', None))
+                fundamental_data['debt_to_equity'] = _safe_float(latest.get('资产负债率', None))
+                fundamental_data['rd_expense'] = _safe_float(latest.get('研发费用', None))
+        except Exception as e:
+            print(f"[WARN] Failed to fetch financial analysis: {e}")
+
+        try:
+            # 获取现金流数据 (用于 FCF Yield)
+            cashflow_df = ak.stock_cash_flow_sheet_by_report_em(symbol=normalized_symbol)
+            if cashflow_df is not None and not cashflow_df.empty:
+                latest_cf = cashflow_df.iloc[0]
+                # 经营活动现金流
+                ocf = _safe_float(latest_cf.get('经营活动产生的现金流量净额', None))
+                fundamental_data['operating_cash_flow'] = ocf
+        except Exception as e:
+            print(f"[WARN] Failed to fetch cash flow data: {e}")
+
+        try:
+            # 获取营收数据 (用于计算 CAGR)
+            profit_df = ak.stock_profit_sheet_by_report_em(symbol=normalized_symbol)
+            if profit_df is not None and not profit_df.empty and len(profit_df) >= 3:
+                # 获取最近3年的营收数据
+                revenues = []
+                for i in range(min(3, len(profit_df))):
+                    revenue = _safe_float(profit_df.iloc[i].get('营业总收入', None))
+                    if revenue:
+                        revenues.append(revenue)
+
+                if len(revenues) >= 2:
+                    # 计算 CAGR
+                    cagr = _calculate_cagr(revenues)
+                    fundamental_data['revenue_growth_cagr'] = cagr
+        except Exception as e:
+            print(f"[WARN] Failed to fetch profit data: {e}")
+
+        # ============================================
+        # 3. 计算动量指标 (RSI, Beta, Volatility)
+        # ============================================
+        momentum_metrics = _calculate_momentum_metrics(stock_df, index_df)
+
+        # ============================================
+        # 4. 组装最终指标
+        # ============================================
+        latest_price = float(stock_df.iloc[-1]['收盘'])
+
+        # PEG Ratio 计算
+        pe_ratio = fundamental_data.get('pe_ratio')
+        revenue_cagr = fundamental_data.get('revenue_growth_cagr')
+        peg_ratio = None
+        if pe_ratio and revenue_cagr and revenue_cagr != 0:
+            peg_ratio = pe_ratio / (revenue_cagr * 100)  # PE / (增长率% * 100)
+
+        # FCF Yield 计算
+        market_cap = fundamental_data.get('market_cap')
+        ocf = fundamental_data.get('operating_cash_flow')
+        fcf_yield = None
+        if market_cap and market_cap > 0 and ocf:
+            # 如果有自由现金流数据更好，这里用经营现金流替代
+            fcf_yield = (ocf / market_cap) * 100
+
+        # R&D Intensity 计算
+        rd_expense = fundamental_data.get('rd_expense')
+        rd_intensity = None
+        if rd_expense and revenue_cagr:
+            # 研发费用 / 营收 (这里用最新营收估计)
+            latest_revenue = None
+            if 'revenues' in locals() and len(revenues) > 0:
+                latest_revenue = revenues[0]
+            if latest_revenue and latest_revenue > 0:
+                rd_intensity = (rd_expense / latest_revenue) * 100
+
+        metrics = {
+            # 价值因子
+            "roe": fundamental_data.get('roe'),
+            "debt_to_equity": fundamental_data.get('debt_to_equity'),
+            "fcf_yield": fcf_yield,
+            "pe_ratio": pe_ratio,
+            "pb_ratio": fundamental_data.get('pb_ratio'),
+            # 成长因子
+            "revenue_growth_cagr": revenue_cagr,
+            "peg_ratio": peg_ratio,
+            "rd_intensity": rd_intensity,
+            # 动量因子
+            "rsi_14": momentum_metrics.get('rsi_14'),
+            "beta": momentum_metrics.get('beta'),
+            "volatility": momentum_metrics.get('volatility'),
+        }
+
+        # 生成文本上下文
+        context = _format_financial_context(symbol, latest_price, metrics)
+
+        print(f"[OK] Financial metrics calculated for {symbol}")
+
+        return {
+            "symbol": symbol.upper(),
+            "market": market,
+            "metrics": metrics,
+            "context": context
+        }
+
+    except Exception as e:
+        print(f"[ERROR] Failed to calculate financial metrics for {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
+        return _build_financial_fallback(symbol, market, str(e))
+
+
+def _safe_float(value) -> Optional[float]:
+    """安全地将值转换为 float"""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _calculate_cagr(values: list) -> Optional[float]:
+    """
+    计算复合增长率 (CAGR)
+
+    Formula: (Ending Value / Beginning Value)^(1/n) - 1
+    """
+    if not values or len(values) < 2:
+        return None
+
+    try:
+        begin_value = values[-1]  # 最早的值
+        end_value = values[0]      # 最新的值
+        n = len(values) - 1
+
+        if begin_value <= 0 or end_value <= 0:
+            return None
+
+        cagr = ((end_value / begin_value) ** (1 / n) - 1) * 100
+        return cagr
+    except Exception:
+        return None
+
+
+def _calculate_momentum_metrics(stock_df: pd.DataFrame, index_df: pd.DataFrame) -> Dict:
+    """
+    计算动量指标 (RSI, Beta, Volatility)
+    """
+    metrics = {}
+
+    try:
+        # 计算 RSI (14)
+        close_prices = stock_df['收盘'].values
+        delta = pd.Series(close_prices).diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        metrics['rsi_14'] = float(rsi.iloc[-1])
+    except Exception as e:
+        print(f"[WARN] Failed to calculate RSI: {e}")
+
+    try:
+        # 计算 Beta (相对沪深300)
+        if index_df is not None and not index_df.empty:
+            # 对齐时间序列
+            stock_returns = stock_df['收盘'].pct_change().dropna()
+            index_returns = index_df['收盘'].pct_change().dropna()
+
+            # 计算协方差和方差
+            if len(stock_returns) > 30 and len(index_returns) > 30:
+                min_len = min(len(stock_returns), len(index_returns))
+                covariance = stock_returns.iloc[:min_len].cov(index_returns.iloc[:min_len])
+                index_variance = index_returns.iloc[:min_len].var()
+
+                if index_variance > 0:
+                    beta = covariance / index_variance
+                    metrics['beta'] = float(beta)
+    except Exception as e:
+        print(f"[WARN] Failed to calculate Beta: {e}")
+
+    try:
+        # 计算 Volatility (年化波动率)
+        returns = stock_df['收盘'].pct_change().dropna()
+        if len(returns) > 0:
+            volatility = returns.std() * (252 ** 0.5) * 100  # 年化
+            metrics['volatility'] = float(volatility)
+    except Exception as e:
+        print(f"[WARN] Failed to calculate volatility: {e}")
+
+    return metrics
+
+
+def _format_financial_context(symbol: str, price: float, metrics: Dict) -> str:
+    """
+    将财务指标格式化为 LLM 可读的文本上下文
+    """
+    lines = [
+        f"## {symbol} - Financial Analysis Dashboard",
+        f"Current Price: ¥{price:.2f}",
+        "",
+        "### Warren Buffett (Value Factors):",
+    ]
+
+    # 价值因子
+    roe = metrics.get('roe')
+    debt_to_equity = metrics.get('debt_to_equity')
+    fcf_yield = metrics.get('fcf_yield')
+
+    lines.append(f"- **ROE (净资产收益率)**: {roe:.2f}%" if roe is not None else "- **ROE**: N/A")
+    lines.append(f"  → {'Excellent (>20%)' if roe and roe > 20 else 'Good (>15%)' if roe and roe > 15 else 'Mediocre' if roe else 'No data'}")
+
+    lines.append(f"- **Debt-to-Equity (产权比率)**: {debt_to_equity:.2f}" if debt_to_equity is not None else "- **D/E**: N/A")
+    lines.append(f"  → {'Conservative (<0.3)' if debt_to_equity and debt_to_equity < 0.3 else 'Manageable (<1.0)' if debt_to_equity and debt_to_equity < 1.0 else 'Risky (>1.0)' if debt_to_equity else 'No data'}")
+
+    lines.append(f"- **FCF Yield (自由现金流收益率)**: {fcf_yield:.2f}%" if fcf_yield is not None else "- **FCF Yield**: N/A")
+    lines.append(f"  → {'Beats bonds (>4%)' if fcf_yield and fcf_yield > 4 else 'Underperforms bonds' if fcf_yield else 'No data'}")
+
+    # 成长因子
+    lines.extend([
+        "",
+        "### Cathie Wood (Growth Factors):",
+    ])
+
+    revenue_cagr = metrics.get('revenue_growth_cagr')
+    peg_ratio = metrics.get('peg_ratio')
+    rd_intensity = metrics.get('rd_intensity')
+
+    lines.append(f"- **Revenue Growth CAGR (3年营收复合增长)**: {revenue_cagr:.2f}%" if revenue_cagr is not None else "- **Revenue Growth**: N/A")
+    lines.append(f"  → {'Hypergrowth (>30%)' if revenue_cagr and revenue_cagr > 30 else 'Strong (>20%)' if revenue_cagr and revenue_cagr > 20 else 'Moderate' if revenue_cagr else 'No data'}")
+
+    lines.append(f"- **PEG Ratio**: {peg_ratio:.2f}" if peg_ratio is not None else "- **PEG**: N/A")
+    lines.append(f"  → {'Undervalued (<1.0)' if peg_ratio and peg_ratio < 1.0 else 'Fair (1.0-2.0)' if peg_ratio and peg_ratio <= 2.0 else 'Overvalued (>2.0)' if peg_ratio else 'No data'}")
+
+    lines.append(f"- **R&D Intensity (研发费用占比)**: {rd_intensity:.2f}%" if rd_intensity is not None else "- **R&D Intensity**: N/A")
+    lines.append(f"  → {'True innovator (>15%)' if rd_intensity and rd_intensity > 15 else 'Adequate (>10%)' if rd_intensity and rd_intensity >= 10 else 'Fake tech (<10%)' if rd_intensity else 'No data'}")
+
+    # 动量因子
+    lines.extend([
+        "",
+        "### Jim Simons (Momentum Factors):",
+    ])
+
+    rsi = metrics.get('rsi_14')
+    beta = metrics.get('beta')
+    volatility = metrics.get('volatility')
+
+    lines.append(f"- **RSI (14)**: {rsi:.2f}" if rsi is not None else "- **RSI**: N/A")
+    lines.append(f"  → {'Oversold (<30)' if rsi and rsi < 30 else 'Overbought (>70)' if rsi and rsi > 70 else 'Neutral' if rsi else 'No data'}")
+
+    lines.append(f"- **Beta**: {beta:.2f}" if beta is not None else "- **Beta**: N/A")
+    lines.append(f"  → {'Low volatility (<0.8)' if beta and beta < 0.8 else 'High volatility (>1.5)' if beta and beta > 1.5 else 'Normal' if beta else 'No data'}")
+
+    lines.append(f"- **Volatility (年化波动率)**: {volatility:.2f}%" if volatility is not None else "- **Volatility**: N/A")
+
+    return "\n".join(lines)
+
+
+def _build_financial_fallback(symbol: str, market: str, error: str) -> Dict:
+    """构建财务指标的降级响应"""
+    return {
+        "symbol": symbol.upper(),
+        "market": market,
+        "metrics": {
+            "roe": None,
+            "debt_to_equity": None,
+            "fcf_yield": None,
+            "pe_ratio": None,
+            "pb_ratio": None,
+            "revenue_growth_cagr": None,
+            "peg_ratio": None,
+            "rd_intensity": None,
+            "rsi_14": None,
+            "beta": None,
+            "volatility": None,
+        },
+        "context": f"## {symbol.upper()} - Financial Data Unavailable\n\nUnable to fetch financial metrics due to: {error}\n\nPlease try again later or use default analysis."
+    }
+
+
+# ============================================
+# 新闻数据 - 支持情绪分析
+# ============================================
+
+def get_news_titles(symbol: str, limit: int = 5) -> str:
+    """
+    获取股票相关新闻标题，用于情绪分析
+
+    Args:
+        symbol: A股代码 (6位数字)
+        limit: 返回新闻数量
+
+    Returns:
+        新闻标题文本（用分号分隔）
+    """
+    market = _detect_market_type(symbol)
+    normalized_symbol = _normalize_symbol(symbol, market)
+
+    if market != 'A':
+        return "[新闻] 仅支持A股"
+
+    try:
+        print(f"[INFO] Fetching news for {symbol}...")
+
+        # 使用AkShare获取新闻标题
+        news_df = _retry_akshare_call(
+            ak.stock_news_em,
+            symbol=normalized_symbol,
+            max_retries=2,
+            timeout=10
+        )
+
+        if news_df is None or news_df.empty:
+            return "[新闻] 暂无最新新闻"
+
+        # 获取最近的几条新闻
+        titles = news_df.head(limit)['新闻标题'].tolist()
+
+        # 格式化输出
+        formatted = " | ".join(titles)
+
+        print(f"[OK] Found {len(titles)} news items")
+        return formatted
+
+    except Exception as e:
+        print(f"[WARN] Failed to fetch news for {symbol}: {e}")
+        return "[新闻] 暂无最新新闻"
 

@@ -3,10 +3,14 @@ Fintech Platform - Backend API
 FastAPI Application Entry Point
 """
 
+# 加载 .env 文件 (必须在其他导入之前)
+from dotenv import load_dotenv
+load_dotenv()
+
 import uuid
 from typing import Literal
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -19,8 +23,12 @@ from app.services.market_service import (
     get_weekly_performance,
     validate_symbol,
     get_market_sentiment,
-    get_stock_technical_analysis
+    get_stock_technical_analysis,
+    calculate_financial_metrics
 )
+from app.services.market_service_baostock import get_financials_baostock
+from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, get_ic_recommendation_summary
+from app.services.committee_service import CommitteeService
 from app.core.db import get_db_client
 
 
@@ -143,6 +151,59 @@ class WeeklyReviewResponse(BaseModel):
     end_price: float
     price_change_pct: float
     ai_analysis: str
+
+
+class ICMeetingRequest(BaseModel):
+    """AI投委会会议请求模型"""
+    symbol: str
+    stock_name: str | None = None
+    current_price: float | None = None
+    industry: str | None = None
+    market_cap: str | None = None
+    pe_ratio: str | None = None
+    pb_ratio: str | None = None
+    roe: str | None = None
+    revenue_growth: str | None = None
+    peg_ratio: str | None = None
+    debt_to_equity: str | None = None
+    rd_intensity: str | None = None
+    beta: str | None = None
+    rsi_14: str | None = None
+    fcf_yield: str | None = None
+
+
+class ICMeetingResponse(BaseModel):
+    """AI投委会会议响应模型"""
+    symbol: str
+    stock_name: str
+    current_price: float
+    verdict_chinese: str
+    conviction_stars: str
+    cathie_wood: str
+    nancy_pelosi: str
+    warren_buffett: str
+    final_verdict: dict
+    summary: str
+    technical_score: int | None = None
+    fundamental_score: int | None = None
+
+
+# ============================================
+# Committee Service Models (三方博弈)
+# ============================================
+class CommitteeRequest(BaseModel):
+    """三方博弈请求模型"""
+    symbol: str
+
+
+class CommitteeResponse(BaseModel):
+    """三方博弈响应模型"""
+    symbol: str
+    timestamp: str
+    fundamentals: dict
+    debate: dict
+    conclusion: dict
+
 
 
 # ============================================
@@ -600,7 +661,7 @@ async def get_stock_technical_analysis_endpoint(symbol: str, update_persistent: 
         symbol: 股票代码
         update_persistent: 是否更新持久化数据（默认True）
     """
-    print(f"\n[API] 📡 Technical analysis request for {symbol}")
+    print(f"\n[API] Technical analysis request for {symbol}")
 
     try:
         # 验证股票代码格式
@@ -636,15 +697,19 @@ async def get_stock_technical_analysis_endpoint(symbol: str, update_persistent: 
         if update_persistent:
             # 使用后台线程更新数据库，避免阻塞主响应
             import threading
-            print(f"[API] 🔄 Spawning background thread to update database for {symbol}...")
-            thread = threading.Thread(
-                target=update_portfolio_persistent_data,
-                args=(symbol, technical),
-                daemon=True
-            )
-            thread.start()
+            print(f"[API] Spawning background thread to update database for {symbol}...")
+            try:
+                thread = threading.Thread(
+                    target=update_portfolio_persistent_data,
+                    args=(symbol, technical),
+                    daemon=True
+                )
+                thread.start()
+            except Exception as thread_error:
+                print(f"[WARN] Failed to start background thread: {thread_error}")
 
-        print(f"[API] ✅ Analysis complete: {technical['k_line_pattern']}, Score={technical['health_score']}")
+        health_score = technical.get('health_score', 'N/A')
+        print(f"[API] Analysis complete: Score={health_score}")
         return technical
 
     except Exception as e:
@@ -670,6 +735,46 @@ async def get_stock_technical_analysis_endpoint(symbol: str, update_persistent: 
             "analysis": f"网络连接错误，无法获取{symbol}的技术分析数据。请检查网络连接后重试。",
             "quote": "投资有风险，入市需谨慎。",
             "date": datetime.now().strftime('%Y-%m-%d')
+        }
+
+
+@app.get("/api/v1/market/financial/{symbol}")
+async def get_stock_financial_metrics(symbol: str):
+    """
+    获取个股财务指标（硬核量化分析）
+
+    返回价值、成长、动量三大类指标，为 AI 投委会提供数据支撑
+    """
+    print(f"[INFO] Fetching financial metrics for: {symbol}")
+
+    try:
+        # 验证股票代码格式
+        if not validate_symbol(symbol):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail="Invalid stock symbol format")
+
+        financial = calculate_financial_metrics(symbol)
+        if not financial:
+            # 返回默认数据而不是404错误
+            print(f"[WARN] Financial metrics unavailable for {symbol}, returning default data")
+            return {
+                "symbol": symbol,
+                "metrics": {},
+                "context": "Financial data temporarily unavailable. Please try again later."
+            }
+
+        print(f"[OK] Financial metrics retrieved for {symbol}")
+        return financial
+
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch financial metrics: {e}")
+        import traceback
+        traceback.print_exc()
+        # 返回默认数据而不是500错误
+        return {
+            "symbol": symbol,
+            "metrics": {},
+            "context": f"Error retrieving financial data: {str(e)}"
         }
 
 
@@ -826,7 +931,240 @@ async def generate_portfolio_report():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/ic/meeting", response_model=ICMeetingResponse)
+async def conduct_ic_meeting(request: ICMeetingRequest):
+    """
+    召开AI投委会会议
+
+    四位著名投资者（Cathie Wood、Nancy Pelosi、Warren Buffett、Charlie Munger）
+    将对指定股票进行多视角分析，并给出最终投资建议。
+
+    流程：
+    1. 并行执行：Cathie Wood + Nancy Pelosi 独立分析
+    2. 顺序执行：Warren Buffett 审阅前两者观点
+    3. 最终裁决：Charlie Munger 综合所有观点并给出JSON判决
+    """
+    import os
+    from datetime import datetime
+
+    print(f"[INFO] Conducting IC meeting for: {request.symbol}")
+
+    try:
+        # 如果没有提供股票名称或价格，从Baostock获取
+        stock_name = request.stock_name
+        current_price = request.current_price if request.current_price is not None else None
+
+        if not stock_name:
+            stock_info = get_stock_info(request.symbol, fetch_price=False)
+            if stock_info:
+                stock_name = stock_info.get("name", request.symbol)
+
+        if current_price is None:
+            # 先尝试从Baostock获取价格
+            baostock_data = get_financials_baostock(request.symbol)
+            if baostock_data and baostock_data.get('metrics'):
+                current_price = baostock_data['metrics'].get('current_price')
+
+        # 如果Baostock没有价格，尝试从AkShare获取
+        if current_price is None or current_price == 0:
+            technical = get_stock_technical_analysis(request.symbol)
+            if technical:
+                current_price = technical.get("current_price", 0.0)
+
+        if current_price is None:
+            current_price = 0.0
+
+        # 获取完整的财务指标数据
+        # 优先使用Baostock（免费、稳定），如果失败则使用AkShare
+        baostock_data = get_financials_baostock(request.symbol)
+        if baostock_data and baostock_data.get('metrics'):
+            print(f"[OK] Using Baostock data source")
+            metrics_data = baostock_data['metrics']
+            data_source = 'baostock'
+        else:
+            print(f"[WARN] Baostock failed, trying AkShare...")
+            financial_metrics = calculate_financial_metrics(request.symbol)
+            metrics_data = financial_metrics.get("metrics", {})
+            data_source = 'akshare'
+
+        # 获取市场快照数据（实时行情 + 核心财务指标）
+        from app.services.market_service import get_market_snapshot
+        market_snapshot = get_market_snapshot(request.symbol)
+        if market_snapshot and market_snapshot.get('fundamentals'):
+            print(f"[OK] Market snapshot available for IC analysis")
+            snapshot_fundamentals = market_snapshot.get('fundamentals', {})
+            # 如果之前的数据源没有某些指标，使用快照数据补充
+            if not metrics_data.get('pe_ratio') and snapshot_fundamentals.get('pe_ttm'):
+                metrics_data['pe_ratio'] = snapshot_fundamentals.get('pe_ttm')
+            if not metrics_data.get('pb_ratio') and snapshot_fundamentals.get('pb'):
+                metrics_data['pb_ratio'] = snapshot_fundamentals.get('pb')
+            if not metrics_data.get('roe') and snapshot_fundamentals.get('roe'):
+                metrics_data['roe'] = snapshot_fundamentals.get('roe')
+            # 更新实时价格和换手率
+            if market_snapshot.get('current_price'):
+                current_price = market_snapshot.get('current_price')
+            if snapshot_fundamentals.get('turnover'):
+                metrics_data['turnover_realtime'] = snapshot_fundamentals.get('turnover')
+            if snapshot_fundamentals.get('total_mv'):
+                metrics_data['market_cap_realtime'] = snapshot_fundamentals.get('total_mv')
+        else:
+            print(f"[WARN] Market snapshot not available, using existing data")
+
+        # 获取技术分析数据（用于智能资金流向、RSI等）
+        technical_data = get_stock_technical_analysis(request.symbol)
+        if technical_data:
+            print(f"[OK] Technical data available for IC analysis")
+
+        # 格式化函数：将数字转换为易读格式
+        def format_metric(value, unit='', decimals=2):
+            if value is None or value == 'N/A':
+                return 'N/A'
+            try:
+                if isinstance(value, str):
+                    value = float(value)
+                # 如果是百分比形式的小数（如0.26表示26%），转换为百分比
+                if unit == '%' and abs(value) < 1:
+                    return f"{value * 100:.{decimals}f}%"
+                return f"{value:.{decimals}f}{unit}"
+            except:
+                return str(value)
+
+        # 计算PEG比率（如果有PE和营收增长）
+        # PEG = PE Ratio / Revenue Growth Rate (%)
+        pe_ratio = metrics_data.get('pe_ratio')
+        revenue_growth = metrics_data.get('revenue_growth_cagr')
+        calculated_peg = None
+        if pe_ratio and revenue_growth:
+            try:
+                pe_float = float(pe_ratio)
+                growth_float = float(revenue_growth)
+                # revenue_growth_cagr 是小数形式（如0.15表示15%），需要转换为百分比
+                growth_percentage = growth_float * 100 if abs(growth_float) < 1 else growth_float
+                if growth_percentage > 0:
+                    calculated_peg = pe_float / growth_percentage
+            except:
+                pass
+
+        # 准备上下文（使用实际财务数据 + 技术分析数据 + 市场快照）
+        # 优先使用实时市场快照数据，如果没有则使用其他数据源
+        turnover_value = (
+            format_metric(metrics_data.get('turnover_realtime')) if metrics_data.get('turnover_realtime') else
+            format_metric(technical_data.get('turnover')) if technical_data and technical_data.get('turnover') else
+            'N/A'
+        )
+        market_cap_value = (
+            f"{metrics_data.get('market_cap_realtime'):.0f}亿" if metrics_data.get('market_cap_realtime') else
+            request.market_cap or
+            "N/A"
+        )
+
+        context = {
+            "industry": request.industry or (stock_info.get('industry_en') if stock_info else 'N/A'),
+            "market_cap": market_cap_value,
+            # 格式化财务指标
+            "pe_ratio": request.pe_ratio or format_metric(metrics_data.get('pe_ratio')),
+            "revenue_growth": request.revenue_growth or format_metric(metrics_data.get('revenue_growth_cagr'), '%'),
+            "roe": format_metric(metrics_data.get('roe'), '%'),
+            "debt_to_equity": format_metric(metrics_data.get('debt_to_equity'), '%'),
+            "pb_ratio": format_metric(metrics_data.get('pb_ratio')),
+            "peg_ratio": request.peg_ratio or format_metric(calculated_peg if calculated_peg else metrics_data.get('peg_ratio')),
+            "rd_intensity": format_metric(metrics_data.get('rd_intensity'), '%'),
+            "beta": format_metric(metrics_data.get('beta')),
+            "rsi_14": format_metric(metrics_data.get('rsi_14')),
+            "fcf_yield": format_metric(metrics_data.get('fcf_yield'), '%'),
+            # 技术分析指标（来自 get_stock_technical_analysis）
+            "volume_status": technical_data.get('volume_status', 'N/A') if technical_data else 'N/A',
+            "volume_change_pct": technical_data.get('volume_change_pct', 0) if technical_data else 0,
+            "turnover": turnover_value,
+            "ma20_status": technical_data.get('ma20_status', 'N/A') if technical_data else 'N/A',
+            "health_score": technical_data.get('health_score', 50) if technical_data else 50,
+            "action_signal": technical_data.get('action_signal', 'HOLD') if technical_data else 'HOLD',
+            # 布林带数据
+            "bollinger_upper": technical_data.get('bollinger_upper', 'N/A') if technical_data else 'N/A',
+            "bollinger_lower": technical_data.get('bollinger_lower', 'N/A') if technical_data else 'N/A',
+            "bandwidth": technical_data.get('bandwidth', 'N/A') if technical_data else 'N/A',
+            # VWAP 筹码成本
+            "vwap_20": technical_data.get('vwap_20', 'N/A') if technical_data else 'N/A',
+            "timestamp": datetime.now().isoformat()
+        }
+
+        print(f"[DEBUG] IC Context: {data_source} source")
+        print(f"[DEBUG] PE: {context['pe_ratio']}, ROE: {context['roe']}, Growth: {context['revenue_growth']}")
+
+        # 获取API密钥
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+
+        # 执行IC会议（异步）
+        meeting_result = await conduct_meeting(
+            symbol=request.symbol,
+            stock_name=stock_name or request.symbol,
+            current_price=current_price,
+            context=context,
+            api_key=api_key
+        )
+
+        # 生成摘要
+        summary = get_ic_recommendation_summary(meeting_result)
+
+        print(f"[OK] IC meeting completed: {meeting_result['verdict_chinese']}")
+
+        return ICMeetingResponse(
+            symbol=meeting_result["symbol"],
+            stock_name=meeting_result["stock_name"],
+            current_price=meeting_result["current_price"],
+            verdict_chinese=meeting_result["verdict_chinese"],
+            conviction_stars=meeting_result["conviction_stars"],
+            cathie_wood=meeting_result["cathie_wood"],
+            nancy_pelosi=meeting_result["nancy_pelosi"],
+            warren_buffett=meeting_result["warren_buffett"],
+            final_verdict=meeting_result["final_verdict"],
+            summary=summary,
+            technical_score=meeting_result.get("technical_score"),
+            fundamental_score=meeting_result.get("fundamental_score")
+        )
+
+    except Exception as e:
+        print(f"[ERROR] IC meeting failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/committee/meeting", response_model=CommitteeResponse)
+async def conduct_committee_meeting(request: CommitteeRequest):
+    """
+    召开三方博弈会议
+
+    使用三个不同的AI模型进行多空对决：
+    - 多头 (Qwen): A股顶级游资大佬
+    - 空头 (DeepSeek): 量化做空机构
+    - 裁判 (Zhipu): 首席投资官CIO
+
+    流程：
+    1. 加载市场快照数据
+    2. 多空并行辩论
+    3. 裁判长给出最终投资建议
+    """
+    try:
+        print(f"[INFO] Committee meeting for: {request.symbol}")
+
+        committee_service = CommitteeService()
+        result = await committee_service.run_meeting(request.symbol)
+
+        return CommitteeResponse(**result)
+
+    except Exception as e:
+        print(f"[ERROR] Committee meeting failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
+    import os
 
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    host = os.environ.get("HOST", "0.0.0.0")
+
+    uvicorn.run(app, host=host, port=port, reload=True)
