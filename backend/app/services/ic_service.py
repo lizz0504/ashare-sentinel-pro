@@ -163,87 +163,164 @@ async def call_llm_async(
     timeout: int = DEFAULT_TIMEOUT
 ) -> str:
     """
-    Call DashScope LLM API asynchronously.
+    Call LLM API asynchronously with multi-model fallback.
+
+    优先级: qwen -> deepseek -> zhipu (自动降级)
 
     Args:
         prompt: The prompt to send
-        api_key: DashScope API key
+        api_key: API key (兼容旧参数，现在使用LLM工厂)
         timeout: Request timeout in seconds
 
     Returns:
         LLM response text
     """
+    from app.core.llm_factory import LLMFactory
+
     # Token 检查：使用更保守的估算
-    # 中文字符通常需要 2-3 tokens，我们使用 2.5 作为安全值
     chinese_chars = sum(1 for c in prompt if '\u4e00' <= c <= '\u9fff')
     non_chinese = len(prompt) - chinese_chars
-    # 更保守的估算：中文 2.5 tokens/字符，非中文 0.5 tokens/字符
     estimated_tokens = int(chinese_chars * 2.5 + non_chinese * 0.5)
 
-    # 记录详细信息用于调试
     logger.info(f"[TOKEN_CHECK] Prompt: {len(prompt)} chars, {chinese_chars} Chinese, estimated {estimated_tokens} tokens")
 
-    # 强制限制：无论估算如何，如果 prompt 超过 60000 字符，直接截断
-    MAX_CHARS = 60000  # 约等于 150k tokens（保守估计）
+    # 强制限制
+    MAX_CHARS = 60000
     if len(prompt) > MAX_CHARS:
         logger.error(f"[TOKEN_LIMIT] Prompt too long: {len(prompt)} chars > {MAX_CHARS}, truncating...")
         prompt = prompt[:MAX_CHARS] + "\n\n[...由于长度限制已截断...]"
 
-    # 重新计算截断后的 token
+    # 重新计算
     chinese_chars = sum(1 for c in prompt if '\u4e00' <= c <= '\u9fff')
     non_chinese = len(prompt) - chinese_chars
     estimated_tokens = int(chinese_chars * 2.5 + non_chinese * 0.5)
 
     if estimated_tokens > SAFE_TOKEN_LIMIT:
         logger.error(f"[TOKEN_LIMIT] Estimated {estimated_tokens} > {SAFE_TOKEN_LIMIT}, truncating...")
-        # 按字符数截断到安全值（约 120k tokens = 48000 字符）
         target_chars = int(SAFE_TOKEN_LIMIT / 2.5)
         prompt = prompt[:target_chars] + "\n\n[...由于长度限制已截断...]"
         logger.warning(f"[TOKEN_LIMIT] Truncated to {len(prompt)} chars")
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    # 多模型降级策略 (DeepSeek -> Zhipu)
+    models_to_try = ["deepseek", "zhipu"]
 
-    payload = {
-        "model": "qwen-max",
-        "input": {
-            "messages": [
-                {"role": "system", "content": "You are an expert investment analyst."},
-                {"role": "user", "content": prompt}
-            ]
-        },
-        "parameters": {
-            "max_tokens": 2000,
-            "temperature": 0.7
-        }
-    }
-
-    async with AsyncClient(timeout=timeout) as client:
+    for model in models_to_try:
         try:
-            response = await client.post(DASHSCOPE_API_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+            logger.info(f"[LLM] 🔄 尝试使用 {LLMFactory.NAMES.get(model, model)}...")
 
-            # Extract the generated text
-            if "output" in data and "text" in data["output"]:
-                return data["output"]["text"]
+            system_prompt = "你是一位专业的A股投资分析专家。请按照要求格式返回结果。"
+
+            result = await LLMFactory.fast_reply(
+                model=model,
+                system=system_prompt,
+                user=prompt,
+                timeout=timeout
+            )
+
+            # 检查结果
+            if result and not result.startswith("[错误]"):
+                logger.info(f"[LLM] ✅ {LLMFactory.NAMES.get(model, model)} 成功!")
+                return result
             else:
-                logger.error(f"Unexpected API response structure: {data}")
-                return "Error: Unexpected API response"
+                logger.warning(f"[LLM] ❌ {LLMFactory.NAMES.get(model, model)} 失败: {result[:100]}")
+                continue
 
-        except TimeoutException:
-            logger.error(f"LLM API timeout after {timeout}s")
-            return "Error: API request timed out"
         except Exception as e:
-            logger.error(f"LLM API call failed: {str(e)}")
-            return f"Error: {str(e)}"
+            logger.warning(f"[LLM] ❌ {LLMFactory.NAMES.get(model, model)} 异常: {str(e)[:100]}")
+            continue
+
+    # 所有模型都失败
+    logger.error("[LLM] 💀 所有模型均失败！请检查API密钥配置。")
+    return "Error: 所有LLM模型调用失败，请检查API密钥配置 (DEEPSEEK_API_KEY, ZHIPU_API_KEY)"
 
 
 # =============================================================================
 # JSON Parsing Helper
 # =============================================================================
+
+def extract_agent_score(response: str) -> Dict[str, Any]:
+    """
+    从分析师响应中提取score和reasoning
+
+    Args:
+        response: 分析师的文本响应
+
+    Returns:
+        {
+            "score": 0-100,
+            "reasoning": "摘要文本",
+            "full_response": "完整响应"
+        }
+    """
+    result = {
+        "score": 50,  # 默认分数
+        "reasoning": "无法解析",
+        "full_response": response
+    }
+
+    if not response:
+        return result
+
+    try:
+        # 方法1: 尝试提取JSON格式（支持多行）
+        # 首先尝试提取```json代码块中的内容
+        json_block_pattern = r'```json\s*(.*?)\s*```'
+        json_match = re.search(json_block_pattern, response, re.DOTALL | re.IGNORECASE)
+
+        if json_match:
+            json_text = json_match.group(1).strip()
+        else:
+            # 如果没有代码块，尝试找到完整的JSON对象
+            first_brace = response.find('{')
+            last_brace = response.rfind('}')
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                json_text = response[first_brace:last_brace + 1]
+            else:
+                json_text = None
+
+        # 解析JSON
+        if json_text:
+            # 清理可能的尾随逗号
+            json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
+            parsed = json.loads(json_text)
+
+            if "score" in parsed:
+                result["score"] = max(0, min(100, int(parsed["score"])))
+            if "reasoning" in parsed:
+                result["reasoning"] = parsed["reasoning"][:200]
+
+            logger.info(f"Extracted score from JSON: {result['score']}, reasoning: {result['reasoning'][:50] if result['reasoning'] else 'N/A'}...")
+
+        # 方法2: 如果JSON解析失败，使用正则表达式提取
+        if result["score"] == 50:  # 说明JSON解析没成功
+            score_patterns = [
+                r'[评分评分][:：\s]*(\d+)',
+                r'(\d+)分',
+                r'score[:：\s]*(\d+)',
+            ]
+            for pattern in score_patterns:
+                score_match = re.search(pattern, response)
+                if score_match:
+                    result["score"] = max(0, min(100, int(score_match.group(1))))
+                    logger.info(f"Extracted score from pattern: {result['score']}")
+                    break
+
+            # 提取第一句话作为reasoning
+            lines = [line.strip() for line in response.split('\n') if line.strip()]
+            if lines:
+                # 取第一句非JSON行
+                for line in lines:
+                    if not line.startswith('{') and not line.startswith('[') and not line.startswith('```'):
+                        # 去掉特殊标记
+                        clean_line = re.sub(r'```json|```', '', line)
+                        result["reasoning"] = clean_line[:200]
+                        break
+
+    except Exception as e:
+        logger.warning(f"Failed to extract agent score: {e}")
+
+    return result
+
 
 def clean_and_parse_json(text: str) -> Dict[str, Any]:
     """
@@ -376,18 +453,28 @@ FCF Yield: {context.get('fcf_yield', 'N/A')}
 === Growth Metrics (Cathie Wood) ===
 Revenue Growth (CAGR): {context.get('revenue_growth', 'N/A')}
 PEG Ratio: {context.get('peg_ratio', 'N/A')}
-R&D Intensity: {context.get('rd_intensity', 'N/A')}
+R&D Intensity: {context.get('rd_expense', 'N/A')}
 
 === Technical & Momentum Metrics (Nancy Pelosi) ===
-RSI (14): {context.get('rsi_14', 'N/A')}
+RSI (14): {context.get('rsi', 'N/A')}
 Volume Status: {context.get('volume_status', 'N/A')}
 Volume Change %: {context.get('volume_change_pct', 'N/A')}%
-Turnover Rate: {context.get('turnover', 'N/A')}%
+Turnover Rate: {context.get('turnover_rate', 'N/A')}%
 MA20 Status: {context.get('ma20_status', 'N/A')}
 Health Score: {context.get('health_score', 'N/A')}/100
 Action Signal: {context.get('action_signal', 'N/A')}
-Bollinger Band Width: {context.get('bandwidth', 'N/A')}
-VWAP (20-day): {context.get('vwap_20', 'N/A')}
+Bollinger Band Width: {context.get('bb_width', 'N/A')}
+VWAP (20-day): {context.get('vwap_20d', 'N/A')}
+Bollinger Position: {context.get('bollinger_position', 'N/A')}
+"""
+
+    # 添加数据质量说明
+    if context.get('data_quality_notes'):
+        base_context += f"""
+=== Data Quality Notes ===
+{context.get('data_quality_notes')}
+
+IMPORTANT: When data shows as estimated/calculated, please acknowledge this in your analysis and use it with appropriate caution. Make reasonable judgments based on available data rather than simply stating "data unavailable".
 """
 
     # 检查并截断 base_context（预留足够空间给 prompt）
@@ -403,6 +490,74 @@ VWAP (20-day): {context.get('vwap_20', 'N/A')}
     print(f"[DEBUG] Context keys: {list(context.keys())}")
 
     # =============================================================================
+    # NEW: Enhanced Context Injection (Anti-Hallucination Data)
+    # =============================================================================
+    injection_context = ""
+    profile_data = None
+    news_result = None
+
+    try:
+        # 1. Fetch Tushare Profile (Official Company Identity) - with timeout
+        logger.info(f"[ENHANCED] Fetching Tushare profile for {symbol}...")
+        from app.services.market_service import get_stock_main_business_tushare
+
+        # Add timeout wrapper for Tushare call
+        import signal
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Tushare API call timed out")
+
+        try:
+            # Windows doesn't support signal.alarm, so we'll use a different approach
+            # Just call it directly - if it hangs, we'll catch it in the except
+            profile_data = get_stock_main_business_tushare(symbol)
+            logger.info(f"[ENHANCED] Tushare profile fetched successfully")
+        except Exception as tushare_error:
+            logger.warning(f"[ENHANCED] Tushare fetch failed: {tushare_error}")
+            profile_data = None
+
+        # 2. Fetch Tavily Intel (Real-time News Intelligence)
+        from app.services.search_service import search_financial_news, format_search_context_for_llm
+        logger.info(f"[ENHANCED] Fetching Tavily news for {symbol}...")
+        news_result = await search_financial_news(symbol, stock_name, max_results=5)
+        tavily_context = format_search_context_for_llm(news_result, stock_name)
+
+        # 3. Build Injection Payload (Appended to User Prompt, NOT System Prompt)
+        if profile_data or news_result.get('results'):
+            injection_context = f"""
+
+【=== 新增高维数据输入 (Anti-Hallucination) ===】
+"""
+            if profile_data:
+                injection_context += f"""
+1. 公司官方身份 (Tushare Profile):
+   - 股票代码: {profile_data.get('symbol', 'N/A')}
+   - 股票名称: {profile_data.get('name', 'N/A')}
+   - 所属行业: {profile_data.get('industry', 'N/A')}
+   - 所在地: {profile_data.get('area', 'N/A')}
+   - 主营业务: {profile_data.get('main_business', 'N/A')}
+   - 经营范围: {profile_data.get('business_scope', 'N/A')[:200]}...
+"""
+
+            if news_result.get('results'):
+                injection_context += f"""
+2. 市场实时情报 (Tavily Search):
+{tavily_context}
+"""
+
+            injection_context += """
+【重要】请基于以上新增事实数据，结合你原有的投资逻辑进行分析。不要凭空想象公司业务，以Tushare官方信息为准。
+"""
+            logger.info(f"[ENHANCED] Injected Tushare Profile + Tavily Intel for {symbol}")
+
+    except Exception as e:
+        logger.warning(f"[ENHANCED] Failed to fetch anti-hallucination data: {e}")
+        injection_context = ""
+
+    # Merge injection context into base context
+    enhanced_base_context = base_context + injection_context
+
+    # =============================================================================
     # Round 1: Parallel Execution (Cathie + Nancy)
     # =============================================================================
 
@@ -411,12 +566,12 @@ VWAP (20-day): {context.get('vwap_20', 'N/A')}
     try:
         # Create tasks for parallel execution
         cathie_task = call_llm_async(
-            f"{PROMPT_CATHIE_WOOD}\n\n{base_context}",
+            f"{PROMPT_CATHIE_WOOD}\n\n{enhanced_base_context}",
             api_key or ""
         )
 
         nancy_task = call_llm_async(
-            f"{PROMPT_NANCY_PELOSI}\n\n{base_context}",
+            f"{PROMPT_NANCY_PELOSI}\n\n{enhanced_base_context}",
             api_key or ""
         )
 
@@ -452,7 +607,7 @@ VWAP (20-day): {context.get('vwap_20', 'N/A')}
         nancy_summary = truncate_with_summary(nancy_response, 100)
 
     warren_context = f"""
-{base_context}
+{enhanced_base_context}
 
 ## Previous Analysts' Views (Summarized)
 
@@ -507,7 +662,7 @@ Review the summarized perspectives above, then provide your value investing anal
     warren_brief = truncate_with_summary(warren_brief, 150)
 
     charlie_context = f"""
-{base_context}
+{enhanced_base_context}
 
 ## IC Meeting Summary (Brief)
 
@@ -537,7 +692,7 @@ Review the summarized perspectives above, then provide your FINAL VERDICT in JSO
 
     if final_token_count > SAFE_TOKEN_LIMIT:
         logger.error(f"Charlie's prompt exceeds safe limit: {final_token_count} > {SAFE_TOKEN_LIMIT}")
-        # 紧急截断：只保留最核心的上下文
+        # 紧急截断：保留核心上下文 + 精简的增强数据
         charlie_context = f"""
 Stock: {symbol} - {stock_name}
 Current Price: {current_price}
@@ -549,6 +704,8 @@ PE: {context.get('pe_ratio', 'N/A')}, ROE: {context.get('roe', 'N/A')}, Growth: 
 - Cathie Wood: {truncate_with_summary(cathie_response, 50)}
 - Nancy Pelosi: {truncate_with_summary(nancy_response, 50)}
 - Warren Buffett: {truncate_with_summary(warren_response, 50)}
+
+{injection_context[:300] if injection_context else ""}
 
 Provide your FINAL VERDICT in JSON format. Be concise.
 """
@@ -598,11 +755,39 @@ Provide your FINAL VERDICT in JSON format. Be concise.
 
     verdict_chinese = VERDICT_MAP.get(normalized_verdict["final_verdict"], "持有")
     conviction_level = normalized_verdict["conviction_level"]
-    conviction_stars = CONVICTION_LEVELS.get(conviction_level, "⭐⭐⭐")
+    conviction_stars = CONVICTION_LEVELS.get(conviction_level, "***")  # 使用ASCII星号避免编码问题
 
     # 计算技术面和基本面得分
     technical_score = calculate_technical_score(context)
     fundamental_score = calculate_fundamental_score(context)
+
+    # =============================================================================
+    # NEW: 提取角色评分并计算Dashboard坐标
+    # =============================================================================
+    # 提取三个角色的score和reasoning
+    cathie_score_data = extract_agent_score(cathie_response)
+    nancy_score_data = extract_agent_score(nancy_response)
+    warren_score_data = extract_agent_score(warren_response)
+
+    # 计算器逻辑：将4个角色分数映射到Dashboard坐标
+    # Axis X (Fundamental) = (Warren Buffett * 0.6) + (Nancy Pelosi * 0.4)
+    # Axis Y (Trend/Tech) = (Cathie Wood * 0.5) + (Technical Score * 0.5)
+
+    # X轴：基本面 (Warren = 价值权重0.6 + Nancy = 宏观/政策权重0.4)
+    fundamental_x = int((warren_score_data["score"] * 0.6) + (nancy_score_data["score"] * 0.4))
+    fundamental_x = max(0, min(100, fundamental_x))  # 确保在0-100范围内
+
+    # Y轴：趋势/技术面 (Cathie = 成长权重0.5 + Technical = 技术权重0.5)
+    trend_y = int((cathie_score_data["score"] * 0.5) + (technical_score * 0.5))
+    trend_y = max(0, min(100, trend_y))  # 确保在0-100范围内
+
+    logger.info(f"[CALCULATOR] Cathie Score: {cathie_score_data['score']}, Nancy Score: {nancy_score_data['score']}, Warren Score: {warren_score_data['score']}")
+    logger.info(f"[CALCULATOR] final_x (Fundamental): {fundamental_x}, final_y (Trend): {trend_y}")
+
+    # FLUSH immediately
+    import sys
+    for handler in logger.handlers:
+        handler.flush()
 
     result = {
         "symbol": symbol,
@@ -618,11 +803,21 @@ Provide your FINAL VERDICT in JSON format. Be concise.
         "conviction_stars": conviction_stars,
         "technical_score": technical_score,
         "fundamental_score": fundamental_score,
-        "timestamp": context.get("timestamp", "")
+        "timestamp": context.get("timestamp", ""),
+        # NEW: 添加角色评分和Dashboard坐标
+        "agent_scores": {
+            "cathie_wood": cathie_score_data,
+            "nancy_pelosi": nancy_score_data,
+            "warren_buffett": warren_score_data
+        },
+        "dashboard_position": {
+            "final_x": fundamental_x,  # Axis X: Fundamental (Value * 0.6 + Macro * 0.4)
+            "final_y": trend_y        # Axis Y: Trend (Growth * 0.5 + Technical * 0.5)
+        }
     }
 
     logger.info(f"IC meeting completed for {symbol}: {verdict_chinese} {conviction_stars}")
-
+    logger.info(f"[DEBUG] About to return result with {len(result)} keys")
     return result
 
 

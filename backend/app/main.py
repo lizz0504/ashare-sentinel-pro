@@ -8,13 +8,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import uuid
+import asyncio
 from typing import Literal
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 from app.services.ocr_service import process_pdf
 from app.services.llm_service import generate_chat_response, classify_stock, generate_portfolio_review
@@ -41,20 +41,50 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# CORS 中间件 - 明确允许前端源
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",  # 备用端口
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",  # 备用端口
+        "http://127.0.0.1:3002",
+        "http://localhost:3004",  # 备用端口
+        "http://127.0.0.1:3004"
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
-# 全局 OPTIONS 处理器（在所有路由之前）
+# 请求日志中间件
 @app.middleware("http")
-async def add_options_handler(request: Request, call_next):
-    if request.method == "OPTIONS":
-        response = Response()
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        response.headers["Access-Control-Max-Age"] = "86400"
-        return response
+async def log_requests(request, call_next):
+    """记录所有请求"""
+    import sys
+    import time
+    start_time = time.time()
+
+    # 写入文件以确保输出
+    with open('request_log.txt', 'a', encoding='utf-8') as f:
+        f.write(f"[{time.time()}] {request.method} {request.url}\n")
+        f.flush()
+
+    print(f"[REQUEST] {request.method} {request.url}", flush=True)
+    sys.stdout.flush()
 
     response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
+
+    process_time = (time.time() - start_time) * 1000
+    print(f"[RESPONSE] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)", flush=True)
+
+    with open('request_log.txt', 'a', encoding='utf-8') as f:
+        f.write(f"[{time.time()}] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)\n")
+        f.flush()
+
     return response
 
 
@@ -186,6 +216,9 @@ class ICMeetingResponse(BaseModel):
     summary: str
     technical_score: int | None = None
     fundamental_score: int | None = None
+    # NEW: 添加角色评分和Dashboard坐标
+    agent_scores: dict | None = None
+    dashboard_position: dict | None = None
 
 
 # ============================================
@@ -931,240 +964,195 @@ async def generate_portfolio_report():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/ic/meeting", response_model=ICMeetingResponse)
+@app.post("/api/v1/ic/meeting")
 async def conduct_ic_meeting(request: ICMeetingRequest):
     """
-    召开AI投委会会议
-
-    四位著名投资者（Cathie Wood、Nancy Pelosi、Warren Buffett、Charlie Munger）
-    将对指定股票进行多视角分析，并给出最终投资建议。
-
-    流程：
-    1. 并行执行：Cathie Wood + Nancy Pelosi 独立分析
-    2. 顺序执行：Warren Buffett 审阅前两者观点
-    3. 最终裁决：Charlie Munger 综合所有观点并给出JSON判决
+    召开AI投委会会议 - 完整实现
     """
+    import sys
     import os
-    from datetime import datetime
+    import re
 
-    print(f"[INFO] Conducting IC meeting for: {request.symbol}")
+    def extract_json_content(text: str) -> str:
+        """提取分析内容，移除 JSON 代码块和标题标记"""
+        if not text:
+            return text
+        # 查找 ```json ... ``` 代码块
+        json_match = re.search(r'```json\s*\n?\s*\{.*?\}\s*\n?```', text, re.DOTALL)
+        if json_match:
+            # 提取 JSON 后面的内容
+            content = text[json_match.end():]
+            # 移除【第二步：详细分析】等标题标记
+            content = re.sub(r'【.*?】.*?\n', '', content)
+            return content.strip()
+        # 如果没有找到代码块，尝试移除标题标记
+        content = re.sub(r'【.*?】.*?\n', '', text)
+        return content.strip()
 
     try:
-        # 如果没有提供股票名称或价格，从Baostock获取
-        stock_name = request.stock_name
-        current_price = request.current_price if request.current_price is not None else None
+        # 1. 获取基本股票信息
+        stock_info = get_stock_info(request.symbol, fetch_price=False)
+        stock_name = stock_info.get("name", request.symbol) if stock_info else request.symbol
 
-        if not stock_name:
-            stock_info = get_stock_info(request.symbol, fetch_price=False)
-            if stock_info:
-                stock_name = stock_info.get("name", request.symbol)
+        # 2. 获取财务数据（优先使用 Tushare，降级到 Baostock）
+        from app.services.market_service import calculate_financial_metrics, get_stock_technical_analysis
 
-        if current_price is None:
-            # 先尝试从Baostock获取价格
-            baostock_data = get_financials_baostock(request.symbol)
-            if baostock_data and baostock_data.get('metrics'):
-                current_price = baostock_data['metrics'].get('current_price')
+        # 尝试获取完整财务指标
+        financial_result = calculate_financial_metrics(request.symbol)
+        metrics_data = financial_result.get('metrics', {}) if financial_result else {}
 
-        # 如果Baostock没有价格，尝试从AkShare获取
-        if current_price is None or current_price == 0:
-            technical = get_stock_technical_analysis(request.symbol)
-            if technical:
-                current_price = technical.get("current_price", 0.0)
+        # 导入数据增强服务
+        from app.services.data_enhancement_service import enhance_financial_metrics
 
-        if current_price is None:
-            current_price = 0.0
+        # 获取行业信息用于估算
+        industry = stock_info.get("industry_en", "未知行业") if stock_info else "未知行业"
 
-        # 获取完整的财务指标数据
-        # 优先使用Baostock（免费、稳定），如果失败则使用AkShare
-        baostock_data = get_financials_baostock(request.symbol)
-        if baostock_data and baostock_data.get('metrics'):
-            print(f"[OK] Using Baostock data source")
-            metrics_data = baostock_data['metrics']
-            data_source = 'baostock'
-        else:
-            print(f"[WARN] Baostock failed, trying AkShare...")
-            financial_metrics = calculate_financial_metrics(request.symbol)
-            metrics_data = financial_metrics.get("metrics", {})
-            data_source = 'akshare'
+        # 增强财务数据（智能填充缺失字段）
+        metrics_data = enhance_financial_metrics(metrics_data, industry)
 
-        # 获取市场快照数据（实时行情 + 核心财务指标）
-        from app.services.market_service import get_market_snapshot
-        market_snapshot = get_market_snapshot(request.symbol)
-        if market_snapshot and market_snapshot.get('fundamentals'):
-            print(f"[OK] Market snapshot available for IC analysis")
-            snapshot_fundamentals = market_snapshot.get('fundamentals', {})
-            # 如果之前的数据源没有某些指标，使用快照数据补充
-            if not metrics_data.get('pe_ratio') and snapshot_fundamentals.get('pe_ttm'):
-                metrics_data['pe_ratio'] = snapshot_fundamentals.get('pe_ttm')
-            if not metrics_data.get('pb_ratio') and snapshot_fundamentals.get('pb'):
-                metrics_data['pb_ratio'] = snapshot_fundamentals.get('pb')
-            if not metrics_data.get('roe') and snapshot_fundamentals.get('roe'):
-                metrics_data['roe'] = snapshot_fundamentals.get('roe')
-            # 更新实时价格和换手率
-            if market_snapshot.get('current_price'):
-                current_price = market_snapshot.get('current_price')
-            if snapshot_fundamentals.get('turnover'):
-                metrics_data['turnover_realtime'] = snapshot_fundamentals.get('turnover')
-            if snapshot_fundamentals.get('total_mv'):
-                metrics_data['market_cap_realtime'] = snapshot_fundamentals.get('total_mv')
-        else:
-            print(f"[WARN] Market snapshot not available, using existing data")
-
-        # 获取技术分析数据（用于智能资金流向、RSI等）
+        # 总是获取技术分析数据（包含 RSI、换手率、MA20 等独立指标）
         technical_data = get_stock_technical_analysis(request.symbol)
+        print(f"[DEBUG] Technical data received: {list(technical_data.keys()) if technical_data else 'None'}")
         if technical_data:
-            print(f"[OK] Technical data available for IC analysis")
+            # 先合并所有原始数据
+            for key, value in technical_data.items():
+                metrics_data[key] = value
 
-        # 格式化函数：将数字转换为易读格式
-        def format_metric(value, unit='', decimals=2):
-            if value is None or value == 'N/A':
-                return 'N/A'
-            try:
-                if isinstance(value, str):
-                    value = float(value)
-                # 如果是百分比形式的小数（如0.26表示26%），转换为百分比
-                if unit == '%' and abs(value) < 1:
-                    return f"{value * 100:.{decimals}f}%"
-                return f"{value:.{decimals}f}{unit}"
-            except:
-                return str(value)
+            # 计算布林带位置
+            if technical_data.get('bollinger_lower') and technical_data.get('bollinger_upper'):
+                bb_range = technical_data['bollinger_upper'] - technical_data['bollinger_lower']
+                if bb_range > 0:
+                    bb_position = (technical_data['current_price'] - technical_data['bollinger_lower']) / bb_range
+                    metrics_data['bollinger_position'] = f"{bb_position:.1%}"
+                else:
+                    metrics_data['bollinger_position'] = "N/A"
+            else:
+                metrics_data['bollinger_position'] = "N/A"
 
-        # 计算PEG比率（如果有PE和营收增长）
-        # PEG = PE Ratio / Revenue Growth Rate (%)
-        pe_ratio = metrics_data.get('pe_ratio')
-        revenue_growth = metrics_data.get('revenue_growth_cagr')
-        calculated_peg = None
-        if pe_ratio and revenue_growth:
-            try:
-                pe_float = float(pe_ratio)
-                growth_float = float(revenue_growth)
-                # revenue_growth_cagr 是小数形式（如0.15表示15%），需要转换为百分比
-                growth_percentage = growth_float * 100 if abs(growth_float) < 1 else growth_float
-                if growth_percentage > 0:
-                    calculated_peg = pe_float / growth_percentage
-            except:
-                pass
+            # 标准化字段名称（必须在合并后立即执行）
+            if 'rsi_14' in technical_data and technical_data['rsi_14'] is not None:
+                metrics_data['rsi'] = technical_data['rsi_14']
+                print(f"[DEBUG] Set rsi={technical_data['rsi_14']}")
+            if 'bandwidth' in technical_data and technical_data['bandwidth'] is not None:
+                metrics_data['bb_width'] = technical_data['bandwidth']
+                print(f"[DEBUG] Set bb_width={technical_data['bandwidth']}")
+            if 'vwap_20' in technical_data and technical_data['vwap_20'] is not None:
+                metrics_data['vwap_20d'] = technical_data['vwap_20']
+                print(f"[DEBUG] Set vwap_20d={technical_data['vwap_20']}")
+            if 'turnover' in technical_data and technical_data['turnover'] is not None:
+                metrics_data['turnover_rate'] = technical_data['turnover']
+                print(f"[DEBUG] Set turnover_rate={technical_data['turnover']}")
 
-        # 准备上下文（使用实际财务数据 + 技术分析数据 + 市场快照）
-        # 优先使用实时市场快照数据，如果没有则使用其他数据源
-        turnover_value = (
-            format_metric(metrics_data.get('turnover_realtime')) if metrics_data.get('turnover_realtime') else
-            format_metric(technical_data.get('turnover')) if technical_data and technical_data.get('turnover') else
-            'N/A'
-        )
-        market_cap_value = (
-            f"{metrics_data.get('market_cap_realtime'):.0f}亿" if metrics_data.get('market_cap_realtime') else
-            request.market_cap or
-            "N/A"
-        )
+            current_price = technical_data.get('current_price', metrics_data.get('current_price', 100.0))
+            print(f"[DEBUG] Final metrics_data keys: {list(metrics_data.keys())}")
+        else:
+            current_price = metrics_data.get('current_price', 100.0)
 
+        # 3. 构建上下文（使用真实财务数据 + 技术分析数据）
+        # 构建带估算说明的上下文
         context = {
-            "industry": request.industry or (stock_info.get('industry_en') if stock_info else 'N/A'),
-            "market_cap": market_cap_value,
-            # 格式化财务指标
-            "pe_ratio": request.pe_ratio or format_metric(metrics_data.get('pe_ratio')),
-            "revenue_growth": request.revenue_growth or format_metric(metrics_data.get('revenue_growth_cagr'), '%'),
-            "roe": format_metric(metrics_data.get('roe'), '%'),
-            "debt_to_equity": format_metric(metrics_data.get('debt_to_equity'), '%'),
-            "pb_ratio": format_metric(metrics_data.get('pb_ratio')),
-            "peg_ratio": request.peg_ratio or format_metric(calculated_peg if calculated_peg else metrics_data.get('peg_ratio')),
-            "rd_intensity": format_metric(metrics_data.get('rd_intensity'), '%'),
-            "beta": format_metric(metrics_data.get('beta')),
-            "rsi_14": format_metric(metrics_data.get('rsi_14')),
-            "fcf_yield": format_metric(metrics_data.get('fcf_yield'), '%'),
-            # 技术分析指标（来自 get_stock_technical_analysis）
-            "volume_status": technical_data.get('volume_status', 'N/A') if technical_data else 'N/A',
-            "volume_change_pct": technical_data.get('volume_change_pct', 0) if technical_data else 0,
-            "turnover": turnover_value,
-            "ma20_status": technical_data.get('ma20_status', 'N/A') if technical_data else 'N/A',
-            "health_score": technical_data.get('health_score', 50) if technical_data else 50,
-            "action_signal": technical_data.get('action_signal', 'HOLD') if technical_data else 'HOLD',
-            # 布林带数据
-            "bollinger_upper": technical_data.get('bollinger_upper', 'N/A') if technical_data else 'N/A',
-            "bollinger_lower": technical_data.get('bollinger_lower', 'N/A') if technical_data else 'N/A',
-            "bandwidth": technical_data.get('bandwidth', 'N/A') if technical_data else 'N/A',
-            # VWAP 筹码成本
-            "vwap_20": technical_data.get('vwap_20', 'N/A') if technical_data else 'N/A',
-            "timestamp": datetime.now().isoformat()
+            # 基本信息和估值指标
+            "industry": stock_info.get("industry_en", "未知行业") if stock_info else "未知行业",
+            "market_cap": f"{metrics_data.get('market_cap', 0) / 100000000:.1f}亿" if metrics_data.get('market_cap') else "N/A",
+            "pe_ratio": f"{metrics_data.get('pe_ratio', 0):.1f}" if metrics_data.get('pe_ratio') else "N/A",
+            "pb_ratio": f"{metrics_data.get('pb_ratio', 0):.1f}" if metrics_data.get('pb_ratio') else "N/A",
+
+            # PEG比率 - 显示是否为计算值
+            "peg_ratio": f"{metrics_data.get('peg_ratio', 0):.1f}" if metrics_data.get('peg_ratio') else "N/A",
+
+            # 盈利能力和财务健康
+            "roe": f"{metrics_data.get('roe', 0):.1f}%" if metrics_data.get('roe') else "N/A",
+            "debt_to_equity": f"{metrics_data.get('debt_to_equity', 0):.1f}%" if metrics_data.get('debt_to_equity') else "N/A",
+            "fcf_yield": f"{metrics_data.get('fcf_yield', 0):.1f}%" if metrics_data.get('fcf_yield') else "N/A",
+
+            # 成长指标 - 显示是否为估算值
+            "revenue_growth": f"{metrics_data.get('revenue_growth_cagr', 0):.1f}%" if metrics_data.get('revenue_growth_cagr') else "N/A",
+            "rd_expense": f"{metrics_data.get('rd_intensity', 0):.1f}" if metrics_data.get('rd_intensity') else "N/A",
+
+            # 技术指标 - 使用更安全的格式化逻辑
+            "rsi": f"{metrics_data.get('rsi', 0):.1f}" if metrics_data.get('rsi') is not None else "N/A",
+            "volume_status": metrics_data.get('volume_status', "N/A") or "N/A",
+            "volume_change_pct": f"{metrics_data.get('volume_change_pct', 0):.1f}%" if metrics_data.get('volume_change_pct') is not None else "N/A",
+            "turnover_rate": f"{metrics_data.get('turnover_rate', 0):.2f}%" if metrics_data.get('turnover_rate') is not None else "N/A",
+            "ma20_status": metrics_data.get('ma20_status', "N/A") or "N/A",
+            "bollinger_position": metrics_data.get('bollinger_position', "N/A") or "N/A",
+            "bb_width": f"{metrics_data.get('bb_width', 0):.3f}" if metrics_data.get('bb_width') is not None else "N/A",
+            "vwap_20d": f"{metrics_data.get('vwap_20d', 0):.2f}" if metrics_data.get('vwap_20d') is not None else "N/A",
+
+            # 综合评分
+            "health_score": metrics_data.get('health_score', 50),
+            "action_signal": metrics_data.get('action_signal', "HOLD") or "HOLD"
         }
 
-        print(f"[DEBUG] IC Context: {data_source} source")
-        print(f"[DEBUG] PE: {context['pe_ratio']}, ROE: {context['roe']}, Growth: {context['revenue_growth']}")
+        # 添加数据质量说明给AI
+        data_quality_notes = []
+        if metrics_data.get('revenue_growth_estimated'):
+            data_quality_notes.append(f"营收增长率({context['revenue_growth']})为基于ROE或行业平均值的估算")
+        if metrics_data.get('rd_intensity_estimated'):
+            data_quality_notes.append(f"研发费率({context['rd_expense']})为基于行业平均值的估算")
+        if metrics_data.get('peg_ratio_calculated'):
+            data_quality_notes.append(f"PEG比率({context['peg_ratio']})为基于PE和营收增长率计算得出")
 
-        # 获取API密钥
-        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if data_quality_notes:
+            context['data_quality_notes'] = "; ".join(data_quality_notes)
 
-        # 执行IC会议（异步）
+        # 调试：打印context数据
+        print(f"[DEBUG] Context for AI: rsi={context.get('rsi')}, bb_width={context.get('bb_width')}, vwap_20d={context.get('vwap_20d')}, ma20_status={context.get('ma20_status')}")
+
+        # 4. 执行IC meeting
         meeting_result = await conduct_meeting(
             symbol=request.symbol,
-            stock_name=stock_name or request.symbol,
+            stock_name=stock_name,
             current_price=current_price,
             context=context,
-            api_key=api_key
+            api_key=""
         )
 
-        # 生成摘要
-        summary = get_ic_recommendation_summary(meeting_result)
+        # 5. 构建响应（提取分析内容，移除 markdown 代码块）
+        result = {
+            "symbol": meeting_result["symbol"],
+            "stock_name": meeting_result["stock_name"],
+            "current_price": meeting_result["current_price"],
+            "verdict_chinese": meeting_result["verdict_chinese"],
+            "conviction_stars": meeting_result["conviction_stars"],
+            "cathie_wood": extract_json_content(meeting_result.get("cathie_wood", "")),
+            "nancy_pelosi": extract_json_content(meeting_result.get("nancy_pelosi", "")),
+            "warren_buffett": extract_json_content(meeting_result.get("warren_buffett", "")),
+            "final_verdict": meeting_result["final_verdict"],
+            "summary": get_ic_recommendation_summary(meeting_result),
+            "technical_score": meeting_result.get("technical_score", 50),
+            "fundamental_score": meeting_result.get("fundamental_score", 50),
+            "agent_scores": meeting_result.get("agent_scores"),
+            "dashboard_position": meeting_result.get("dashboard_position")
+        }
 
-        print(f"[OK] IC meeting completed: {meeting_result['verdict_chinese']}")
-
-        return ICMeetingResponse(
-            symbol=meeting_result["symbol"],
-            stock_name=meeting_result["stock_name"],
-            current_price=meeting_result["current_price"],
-            verdict_chinese=meeting_result["verdict_chinese"],
-            conviction_stars=meeting_result["conviction_stars"],
-            cathie_wood=meeting_result["cathie_wood"],
-            nancy_pelosi=meeting_result["nancy_pelosi"],
-            warren_buffett=meeting_result["warren_buffett"],
-            final_verdict=meeting_result["final_verdict"],
-            summary=summary,
-            technical_score=meeting_result.get("technical_score"),
-            fundamental_score=meeting_result.get("fundamental_score")
-        )
-
-    except Exception as e:
-        print(f"[ERROR] IC meeting failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/v1/committee/meeting", response_model=CommitteeResponse)
-async def conduct_committee_meeting(request: CommitteeRequest):
-    """
-    召开三方博弈会议
-
-    使用三个不同的AI模型进行多空对决：
-    - 多头 (Qwen): A股顶级游资大佬
-    - 空头 (DeepSeek): 量化做空机构
-    - 裁判 (Zhipu): 首席投资官CIO
-
-    流程：
-    1. 加载市场快照数据
-    2. 多空并行辩论
-    3. 裁判长给出最终投资建议
-    """
-    try:
-        print(f"[INFO] Committee meeting for: {request.symbol}")
-
-        committee_service = CommitteeService()
-        result = await committee_service.run_meeting(request.symbol)
-
-        return CommitteeResponse(**result)
+        # Log response size for debugging
+        import json
+        result_json = json.dumps(result, ensure_ascii=False)
+        response_size_kb = len(result_json.encode('utf-8')) / 1024
+        print(f"[SUCCESS] IC meeting completed for {request.symbol}: {meeting_result['verdict_chinese']}", flush=True)
+        print(f"[DEBUG] Response size: {response_size_kb:.1f} KB, returning to client...", flush=True)
+        return result
 
     except Exception as e:
-        print(f"[ERROR] Committee meeting failed: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+
+        # 返回错误响应而不是抛出异常
+        return {
+            "symbol": request.symbol,
+            "error": str(e)[:500],
+            "stock_name": request.symbol,
+            "verdict_chinese": "分析失败",
+            "conviction_stars": "*",
+            "cathie_wood": f"分析失败: {str(e)[:200]}",
+            "nancy_pelosi": "",
+            "warren_buffett": "",
+            "final_verdict": {"final_verdict": "HOLD"},
+            "summary": f"分析失败: {str(e)}",
+            "technical_score": 50,
+            "fundamental_score": 50
+        }
 
 
-if __name__ == "__main__":
-    import uvicorn
-    import os
-
-    port = int(os.environ.get("PORT", 8000))
-    host = os.environ.get("HOST", "0.0.0.0")
-
-    uvicorn.run(app, host=host, port=port, reload=True)
+# End of file
