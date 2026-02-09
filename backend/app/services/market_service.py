@@ -11,9 +11,9 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-# 数据源选择：优先使用 Baostock，降级到 AkShare
-_USE_BAOSTOCK = True
-_USE_TUSHARE = False
+# 数据源选择：优先使用 Tushare，降级到 Baostock，最后是 AkShare
+_USE_TUSHARE = True  # 首要数据源
+_USE_BAOSTOCK = True  # 备选数据源
 _data_fetcher = None
 
 # Always import AkShare as fallback
@@ -149,7 +149,8 @@ _STOCK_DATABASE = {
     '300059': {'name': '东方财富', 'sector': '金融', 'industry': '证券'},
     '000725': {'name': '京东方A', 'sector': '科技', 'industry': '半导体'},
     '002475': {'name': '立讯精密', 'sector': '科技', 'industry': '消费电子'},
-    '002028': {'name': '索菲亚', 'sector': '消费品', 'industry': '家居'},
+    '002028': {'name': '思源电气', 'sector': '工业', 'industry': '电气设备'},
+    '002572': {'name': '索菲亚', 'sector': '消费品', 'industry': '家居'},
     '600584': {'name': '长电科技', 'sector': '科技', 'industry': '半导体'},
     '300124': {'name': '汇川技术', 'sector': '工业', 'industry': '自动化'},
     '601390': {'name': '中国中铁', 'sector': '工业', 'industry': '基建'},
@@ -873,49 +874,65 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
 
         print(f"[INFO] Fetching technical data for {symbol}...")
 
-        # 数据源优先级: Baostock → Tushare → AkShare
-        if _BAOSTOCK_AVAILABLE:
+        # 数据源优先级: Tushare → Baostock → AkShare
+        stock_df = None
+        index_df = None
+
+        # 1. 首先尝试 Tushare
+        if _USE_TUSHARE:
             try:
-                print(f"[DATA SOURCE] Using Baostock for {symbol}")
-                stock_df = _get_baostock_data(symbol, start_date, end_date)
-                if stock_df is not None:
-                    index_df = None  # Baostock 暂不支持指数数据
-                else:
-                    raise Exception("Baostock data fetch failed")
-            except Exception as e:
-                print(f"[WARN] Baostock failed, trying Tushare: {e}")
-                stock_df, index_df = _try_tushare_data(symbol, start_date, end_date)
-        elif _USE_TUSHARE:
-            fetcher = _get_data_fetcher()
-            if fetcher:
-                print(f"[DATA SOURCE] Using Tushare Pro for {symbol}")
-                stock_df = fetcher.get_stock_daily(
-                    symbol=normalized_symbol,
-                    start_date=start_str,
-                    end_date=end_str
-                )
-                # 获取沪深300作为基准
-                try:
-                    print(f"[DATA SOURCE] Using Tushare Pro for index 000300 (HS300)")
-                    index_df = fetcher.get_index_daily(
-                        symbol="000300",
+                fetcher = _get_data_fetcher()
+                if fetcher:
+                    print(f"[DATA SOURCE] Using Tushare Pro for {symbol}")
+                    stock_df = fetcher.get_stock_daily(
+                        symbol=normalized_symbol,
                         start_date=start_str,
                         end_date=end_str
                     )
-                except Exception as e:
-                    print(f"[WARN] Failed to fetch index data: {e}")
-                    index_df = None
-            else:
-                # 降级到 AkShare
-                print(f"[DATA SOURCE] Tushare unavailable, falling back to AkShare for {symbol}")
+                    if stock_df is not None and not stock_df.empty:
+                        print(f"[OK] Tushare stock data fetched: {len(stock_df)} records")
+                    else:
+                        print(f"[WARN] Tushare returned empty data")
+                        stock_df = None
+
+                    # 获取沪深300作为基准
+                    try:
+                        index_df = fetcher.get_index_daily(
+                            symbol="000300",
+                            start_date=start_str,
+                            end_date=end_str
+                        )
+                    except Exception as e:
+                        print(f"[WARN] Failed to fetch index data from Tushare: {e}")
+            except Exception as e:
+                print(f"[WARN] Tushare failed, trying Baostock: {e}")
+
+        # 2. 备选：尝试 Baostock
+        if (stock_df is None or stock_df.empty) and _BAOSTOCK_AVAILABLE:
+            try:
+                print(f"[DATA SOURCE] Using Baostock for {symbol}")
+                stock_df = _get_baostock_data(symbol, start_date, end_date)
+                index_df = None  # Baostock 暂不支持指数数据
+                if stock_df is not None and not stock_df.empty:
+                    print(f"[OK] Baostock stock data fetched: {len(stock_df)} records")
+            except Exception as e:
+                print(f"[WARN] Baostock failed: {e}")
+
+        # 3. 最后备选：AkShare
+        if stock_df is None or stock_df.empty:
+            try:
+                print(f"[DATA SOURCE] Using AkShare for {symbol}")
                 stock_df = _retry_akshare_call(
                     ak.stock_zh_a_hist,
                     symbol=normalized_symbol,
                     start_date=start_date.strftime('%Y%m%d'),
                     end_date=end_date.strftime('%Y%m%d')
                 )
+                if stock_df is not None and not stock_df.empty:
+                    print(f"[OK] AkShare stock data fetched: {len(stock_df)} records")
+
+                # 获取沪深300
                 try:
-                    print(f"[DATA SOURCE] Using AkShare for index 000300 (HS300)")
                     index_df = _retry_akshare_call(
                         ak.index_zh_a_hist,
                         symbol="000300",
@@ -926,9 +943,8 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                 except Exception as e:
                     print(f"[WARN] Failed to fetch index data: {e}")
                     index_df = None
-        else:
-            print(f"[DATA SOURCE] Baostock not available, trying Tushare first for {symbol}")
-            stock_df, index_df = _try_tushare_data(symbol, start_date, end_date)
+            except Exception as e:
+                print(f"[WARN] AkShare failed: {e}")
 
         if stock_df is None or stock_df.empty or len(stock_df) < 60:
             print(f"[WARN] Insufficient data for {symbol}")
@@ -1453,20 +1469,65 @@ def calculate_financial_metrics(symbol: str) -> Dict:
         print(f"[INFO] Calculating financial metrics for {symbol}...")
 
         # ============================================
-        # 1. 获取价格数据 (用于 PE, P/B, RSI, Beta, Volatility)
+        # 优先使用 Tushare 获取数据
         # ============================================
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=120)  # 获取足够的历史数据
-        start_str = start_date.strftime('%Y%m%d')
-        end_str = end_date.strftime('%Y%m%d')
+        fundamental_data = {}
+        stock_df = None
+        index_df = None
 
-        stock_df = _retry_akshare_call(
-            ak.stock_zh_a_hist,
-            symbol=normalized_symbol,
-            period="daily",
-            start_date=start_str,
-            end_date=end_str
-        )
+        if _USE_TUSHARE:
+            try:
+                fetcher = _get_data_fetcher()
+                if fetcher:
+                    print(f"[DATA SOURCE] Using Tushare Pro for {symbol} financial metrics")
+
+                    # 使用 Tushare 获取价格数据
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=120)
+                    start_str = start_date.strftime('%Y%m%d')
+                    end_str = end_date.strftime('%Y%m%d')
+
+                    stock_df = fetcher.get_stock_daily(
+                        symbol=normalized_symbol,
+                        start_date=start_date.strftime('%Y-%m-%d'),
+                        end_date=end_date.strftime('%Y-%m-%d')
+                    )
+
+                    if stock_df is not None and not stock_df.empty:
+                        print(f"[OK] Tushare price data fetched: {len(stock_df)} records")
+                    else:
+                        print(f"[WARN] Tushare returned empty data, falling back to AkShare")
+                        stock_df = None
+
+                    # 获取沪深300数据
+                    try:
+                        index_df = fetcher.get_index_daily(
+                            symbol="000300",
+                            start_date=start_date.strftime('%Y-%m-%d'),
+                            end_date=end_date.strftime('%Y-%m-%d')
+                        )
+                    except Exception as e:
+                        print(f"[WARN] Failed to fetch index data from Tushare: {e}")
+                        index_df = None
+            except Exception as e:
+                print(f"[WARN] Tushare financial metrics failed: {e}, falling back to AkShare")
+
+        # ============================================
+        # 1. 获取价格数据 (如果 Tushare 失败，使用 AkShare)
+        # ============================================
+        if stock_df is None:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=120)
+            start_str = start_date.strftime('%Y%m%d')
+            end_str = end_date.strftime('%Y%m%d')
+
+            stock_df = _retry_akshare_call(
+                ak.stock_zh_a_hist,
+                symbol=normalized_symbol,
+                period="daily",
+                start_date=start_str,
+                end_date=end_str
+            )
 
         if stock_df is None or stock_df.empty or len(stock_df) < 20:
             print(f"[WARN] Insufficient price data for {symbol}")
@@ -1475,18 +1536,88 @@ def calculate_financial_metrics(symbol: str) -> Dict:
         stock_df = stock_df.sort_values('日期')
 
         # 获取沪深300数据 (用于计算 Beta)
-        index_df = _retry_akshare_call(
-            ak.index_zh_a_hist,
-            symbol="000300",
-            period="daily",
-            start_date=start_str,
-            end_date=end_str
-        )
+        if index_df is None:
+            index_df = _retry_akshare_call(
+                ak.index_zh_a_hist,
+                symbol="000300",
+                period="daily",
+                start_date=start_str,
+                end_date=end_str
+            )
 
         # ============================================
-        # 2. 获取基本面数据 (AkShare 财务接口)
+        # 2. 获取基本面数据 (Tushare → Baostock → AkShare)
         # ============================================
         fundamental_data = {}
+
+        # 优先使用 Tushare 获取财务指标
+        if _USE_TUSHARE:
+            try:
+                fetcher = _get_data_fetcher()
+                if fetcher:
+                    print(f"[DATA SOURCE] Using Tushare Pro for {symbol} fundamental metrics")
+
+                    # 使用 daily_basic 获取 PE, PB, 市值
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=30)
+
+                    daily_basic_df = fetcher.get_daily_basic(
+                        symbol=normalized_symbol,
+                        start_date=start_date.strftime('%Y-%m-%d'),
+                        end_date=end_date.strftime('%Y-%m-%d')
+                    )
+
+                    if daily_basic_df is not None and not daily_basic_df.empty:
+                        latest = daily_basic_df.iloc[-1]
+                        fundamental_data['pe_ratio'] = _safe_float(latest.get('pe_ttm', None))
+                        fundamental_data['pb_ratio'] = _safe_float(latest.get('pb', None))
+                        fundamental_data['market_cap'] = _safe_float(latest.get('total_mv', None))
+                        fundamental_data['current_price'] = _safe_float(latest.get('close', None))
+                        print(f"[OK] Tushare daily_basic: PE={fundamental_data.get('pe_ratio')}, PB={fundamental_data.get('pb_ratio')}")
+
+                    # 使用 fina_indicator 获取 ROE, 资产负债率
+                    fina_indicator_df = fetcher.get_financial_indicator(
+                        symbol=normalized_symbol,
+                        start_date=(end_date - timedelta(days=365)).strftime('%Y-%m-%d'),
+                        end_date=end_date.strftime('%Y-%m-%d')
+                    )
+
+                    if fina_indicator_df is not None and not fina_indicator_df.empty:
+                        latest = fina_indicator_df.iloc[-1]
+                        fundamental_data['roe'] = _safe_float(latest.get('roe', None))
+                        fundamental_data['debt_to_equity'] = _safe_float(latest.get('debt_to_assets', None))
+                        print(f"[OK] Tushare fina_indicator: ROE={fundamental_data.get('roe')}, D/E={fundamental_data.get('debt_to_equity')}")
+
+                    # 如果所有数据都已获取，跳过后续数据源
+                    if all(fundamental_data.get(k) is not None for k in ['pe_ratio', 'pb_ratio', 'roe']):
+                        print(f"[OK] Tushare complete data, skipping other sources")
+            except Exception as e:
+                print(f"[WARN] Tushare fundamental metrics failed: {e}")
+
+        # 备选：使用 Baostock 获取财务指标
+        if _BAOSTOCK_AVAILABLE and _USE_BAOSTOCK and not fundamental_data.get('pe_ratio'):
+            try:
+                print(f"[DATA SOURCE] Using Baostock for {symbol} financial metrics")
+                baostock_result = get_financials_baostock(symbol)
+                if baostock_result and baostock_result.get('metrics'):
+                    metrics = baostock_result['metrics']
+                    if not fundamental_data.get('pe_ratio'):
+                        fundamental_data['pe_ratio'] = metrics.get('pe_ratio')
+                    if not fundamental_data.get('pb_ratio'):
+                        fundamental_data['pb_ratio'] = metrics.get('pb_ratio')
+                    if not fundamental_data.get('roe'):
+                        fundamental_data['roe'] = metrics.get('roe')
+                    if not fundamental_data.get('debt_to_equity'):
+                        fundamental_data['debt_to_equity'] = metrics.get('debt_to_equity')
+                    if not fundamental_data.get('revenue_growth_cagr'):
+                        fundamental_data['revenue_growth_cagr'] = metrics.get('revenue_growth_cagr')
+                    if not fundamental_data.get('current_price'):
+                        fundamental_data['current_price'] = metrics.get('current_price')
+                    if not fundamental_data.get('market_cap'):
+                        fundamental_data['market_cap'] = metrics.get('market_cap')
+                    print(f"[OK] Baostock financial data: PE={fundamental_data.get('pe_ratio')}, ROE={fundamental_data.get('roe')}")
+            except Exception as e:
+                print(f"[WARN] Baostock financial metrics failed: {e}")
 
         try:
             # 获取个股信息 (包含 PE, PB)
@@ -1781,6 +1912,106 @@ def _build_financial_fallback(symbol: str, market: str, error: str) -> Dict:
         },
         "context": f"## {symbol.upper()} - Financial Data Unavailable\n\nUnable to fetch financial metrics due to: {error}\n\nPlease try again later or use default analysis."
     }
+
+
+# ============================================
+# Tushare 主营业务获取 - 解决行业幻觉问题
+# ============================================
+
+def get_stock_main_business_tushare(symbol: str) -> Optional[Dict]:
+    """
+    从 Tushare 获取股票的主营业务信息，解决 AI 行业幻觉问题
+
+    Args:
+        symbol: A股代码 (6位数字)
+
+    Returns:
+        {
+            "symbol": str,
+            "main_business": str,      # 主营业务描述
+            "business_scope": str,     # 经营范围
+            "industry": str,           # 所属行业
+            "area": str,               # 所在地
+            "name": str,               # 股票名称
+            "source": "tushare_custom"
+        }
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        # 自定义 Tushare 配置
+        _CUSTOM_TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN', '')
+        _CUSTOM_TUSHARE_URL = 'http://lianghua.nanyangqiankun.top'
+
+        if not _CUSTOM_TUSHARE_TOKEN:
+            print("[TUSHARE] No TUSHARE_TOKEN configured")
+            return None
+
+        import tushare as ts
+
+        # 配置自定义代理
+        pro = ts.pro_api(_CUSTOM_TUSHARE_TOKEN)
+        pro._DataApi__token = _CUSTOM_TUSHARE_TOKEN
+        pro._DataApi__http_url = _CUSTOM_TUSHARE_URL
+
+        print(f"[TUSHARE] Fetching main_business for {symbol}...")
+
+        # 标准化股票代码格式为 Tushare 格式 (如 600519.SH)
+        ts_symbol = f"{symbol}.SH" if symbol.startswith('6') else f"{symbol}.SZ"
+
+        result = {
+            "symbol": symbol,
+            "main_business": "",
+            "business_scope": "",
+            "industry": "",
+            "area": "",
+            "name": "",
+            "source": "tushare_custom"
+        }
+
+        # 从 stock_basic 获取基础信息
+        try:
+            basic_data = pro.stock_basic(ts_code=ts_symbol, fields='ts_code,name,industry,area,list_date')
+            if basic_data is not None and not basic_data.empty:
+                row = basic_data.iloc[0]
+                result["industry"] = row.get("industry", "")
+                result["area"] = row.get("area", "")
+                result["name"] = row.get("name", "")
+        except Exception as e:
+            print(f"[TUSHARE] Failed to fetch basic data: {e}")
+
+        # 尝试获取公司信息 (包含主营业务)
+        try:
+            company_data = pro.stock_company(ts_code=ts_symbol, fields='ts_code,main_business,business_scope')
+            if company_data is not None and not company_data.empty:
+                row = company_data.iloc[0]
+                result["main_business"] = row.get("main_business", "")
+                result["business_scope"] = row.get("business_scope", "")
+        except Exception as e:
+            print(f"[TUSHARE] Failed to fetch company data: {e}")
+
+        # 如果还是没有，尝试从 income 接口获取业务构成
+        if not result["main_business"]:
+            try:
+                from datetime import datetime
+                current_year = datetime.now().year
+                income_data = pro.income(ts_code=ts_symbol, period=str(current_year), fields='ts_code,ann_date,main_business')
+                if income_data is not None and not income_data.empty:
+                    latest = income_data.iloc[-1]
+                    result["main_business"] = latest.get("main_business", "")
+            except Exception as e:
+                print(f"[TUSHARE] Failed to fetch income data: {e}")
+
+        print(f"[TUSHARE] Got main_business for {symbol}: {result['main_business'][:100] if result['main_business'] else 'N/A'}...")
+
+        return result if result["main_business"] or result["industry"] else None
+
+    except Exception as e:
+        print(f"[ERROR] Tushare main_business fetch failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # ============================================
