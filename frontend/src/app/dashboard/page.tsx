@@ -12,6 +12,31 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8004"
 const DASHBOARD_CACHE_KEY = 'dashboard_analysis_cache'
 const IC_MEETING_SHARE_KEY = 'ic_meeting_shared_data'
 
+// 带超时控制的 fetch 函数
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeout = 120000) {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), timeout)
+
+  try {
+    console.log('[FETCH] Starting request to:', url)
+    console.log('[FETCH] Options:', options)
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    })
+    clearTimeout(id)
+    console.log('[FETCH] Response received:', response.status)
+    return response
+  } catch (error) {
+    clearTimeout(id)
+    console.error('[FETCH] Request failed:', error)
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('请求超时，AI 分析需要 40-60 秒，请稍后重试')
+    }
+    throw error
+  }
+}
+
 interface ICMMeetingResult {
   symbol: string
   stock_name: string
@@ -20,6 +45,16 @@ interface ICMMeetingResult {
   fundamental_score: number
   verdict_chinese: string
   conviction_stars: string
+  // NEW: AI投委会角色评分和Dashboard坐标
+  agent_scores?: {
+    cathie_wood?: { score: number; reasoning: string; verdict: string }
+    nancy_pelosi?: { score: number; reasoning: string; verdict: string }
+    warren_buffett?: { score: number; reasoning: string; verdict: string }
+  }
+  dashboard_position?: {
+    final_x: number  // 基本面坐标 (Warren×0.6 + Nancy×0.4)
+    final_y: number  // 趋势坐标 (Cathie×0.5 + Tech×0.5)
+  }
 }
 
 export default function DashboardPage() {
@@ -85,7 +120,7 @@ export default function DashboardPage() {
     setError(null)
 
     try {
-      const response = await fetch(`${API_BASE}/api/v1/ic/meeting`, {
+      const response = await fetchWithTimeout(`${API_BASE}/api/v1/ic/meeting`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ symbol: symbol.trim() })
@@ -112,7 +147,18 @@ export default function DashboardPage() {
       })
     } catch (err) {
       console.error("Analysis failed:", err)
-      const errorMessage = err instanceof Error ? err.message : "未知错误"
+      let errorMessage = "分析失败，请重试"
+
+      if (err instanceof Error) {
+        if (err.message.includes('Failed to fetch')) {
+          errorMessage = "无法连接到后端服务，请确保后端正在运行 (http://localhost:8004)"
+        } else if (err.message.includes('超时')) {
+          errorMessage = err.message
+        } else {
+          errorMessage = err.message
+        }
+      }
+
       setError(errorMessage)
     } finally {
       setIsLoading(false)
@@ -192,7 +238,8 @@ export default function DashboardPage() {
             <div className="flex flex-col items-center gap-4">
               <Loader2 className="w-12 h-12 animate-spin text-blue-400" />
               <p className="text-slate-300">AI 投委会正在分析中，请稍候...</p>
-              <p className="text-sm text-slate-500">预计等待时间 20-40 秒</p>
+              <p className="text-sm text-slate-500">预计等待时间 40-60 秒</p>
+              <p className="text-xs text-slate-600 mt-2">4 位 AI 专家正在独立分析</p>
             </div>
           </CardContent>
         </Card>
@@ -223,11 +270,11 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Decision Matrix */}
+          {/* Decision Matrix - 使用新的AI投委会加权坐标 */}
           <div className="bg-slate-900/30 border border-slate-800 rounded-lg p-6">
             <DecisionMatrix
-              technical={result.technical_score}
-              fundamental={result.fundamental_score}
+              technical={result.dashboard_position?.final_y ?? result.technical_score}
+              fundamental={result.dashboard_position?.final_x ?? result.fundamental_score}
             />
           </div>
         </div>

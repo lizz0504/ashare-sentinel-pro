@@ -19,20 +19,29 @@ class DataFetcher:
     提供 AkShare 兼容的接口，便于迁移
     """
 
-    def __init__(self, token: str = None):
+    def __init__(self, token: str = None, http_url: str = None):
         """
         初始化 DataFetcher
 
         Args:
             token: Tushare Pro API token (可选，默认使用配置文件中的token)
+            http_url: 私人链接 URL (可选，默认使用配置文件中的URL)
         """
         self.token = token or settings.TUSHARE_TOKEN
+        self.http_url = http_url or getattr(settings, 'TUSHARE_URL', None)
+
         if not self.token:
             raise ValueError("Tushare token not found in settings")
 
         # 初始化 Tushare
         ts.set_token(self.token)
         self.pro = ts.pro_api()
+
+        # 设置私人链接（如果配置了）
+        if self.http_url:
+            self.pro._DataApi__token = self.token
+            self.pro._DataApi__http_url = self.http_url
+            print(f"[TUSHARE] Using private URL: {self.http_url}")
 
         # 频率控制
         self.last_request_time = 0
@@ -186,6 +195,7 @@ class DataFetcher:
             函数执行结果
         """
         last_error = None
+        last_error_detail = None
 
         for attempt in range(self.max_retries):
             try:
@@ -193,13 +203,24 @@ class DataFetcher:
                 return func(*args, **kwargs)
             except Exception as e:
                 last_error = e
+                # 尝试获取更详细的错误信息
+                error_detail = str(e)
+                if hasattr(e, 'args') and e.args:
+                    error_detail = str(e.args[0]) if e.args else str(e)
+
+                last_error_detail = error_detail
                 if attempt < self.max_retries - 1:
                     wait_time = self.retry_delay * (attempt + 1)
                     print(f"[WARN] Request failed (attempt {attempt + 1}/{self.max_retries}), "
-                          f"retrying in {wait_time}s: {e}")
+                          f"retrying in {wait_time}s: {error_detail}")
                     time.sleep(wait_time)
                 else:
-                    print(f"[ERROR] Request failed after {self.max_retries} attempts: {e}")
+                    print(f"[ERROR] Request failed after {self.max_retries} attempts: {error_detail}")
+
+        # 打印完整的错误堆栈
+        import traceback
+        print(f"[ERROR] Full traceback:")
+        traceback.print_exc()
 
         raise last_error
 
@@ -446,3 +467,187 @@ class DataFetcher:
         self._set_cache(cache_key, df_mapped)
 
         return df_mapped
+
+    def get_daily_basic(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None
+    ) -> pd.DataFrame:
+        """
+        获取每日行情指标 (包含 PE, PB, 总市值等)
+
+        Args:
+            symbol: 6位股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            DataFrame with columns: pe_ttm, pb, total_mv, circ_mv 等
+        """
+        ts_symbol = self._add_suffix(symbol)
+        ts_start = self._convert_date_format(start_date) if start_date else '19700101'
+        ts_end = self._convert_date_format(end_date) if end_date else '20500101'
+
+        # 检查缓存
+        cache_key = self._get_cache_key('daily_basic', symbol=ts_symbol,
+                                        start=ts_start, end=ts_end)
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        # 获取数据
+        def fetch_data():
+            # Tushare daily_basic 接口
+            df = self.pro.daily_basic(
+                ts_code=ts_symbol,
+                start_date=ts_start,
+                end_date=ts_end
+            )
+            return df
+
+        df = self._retry_request(fetch_data)
+
+        if df is not None and not df.empty:
+            # 缓存
+            self._set_cache(cache_key, df)
+
+        return df if df is not None else pd.DataFrame()
+
+    def get_financial_indicator(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None
+    ) -> pd.DataFrame:
+        """
+        获取个股财务指标数据 (包含 ROE, 资产负债率等)
+
+        Args:
+            symbol: 6位股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            DataFrame with financial indicators
+        """
+        ts_symbol = self._add_suffix(symbol)
+        ts_start = self._convert_date_format(start_date) if start_date else '19700101'
+        ts_end = self._convert_date_format(end_date) if end_date else '20500101'
+
+        # 检查缓存
+        cache_key = self._get_cache_key('fina_indicator', symbol=ts_symbol,
+                                        start=ts_start, end=ts_end)
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        # 获取数据
+        def fetch_data():
+            # Tushare fina_indicator 接口
+            df = self.pro.fina_indicator(
+                ts_code=ts_symbol,
+                start_date=ts_start,
+                end_date=ts_end
+            )
+            return df
+
+        df = self._retry_request(fetch_data)
+
+        if df is not None and not df.empty:
+            # 缓存
+            self._set_cache(cache_key, df)
+
+        return df if df is not None else pd.DataFrame()
+
+    def get_balance_sheet(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None
+    ) -> pd.DataFrame:
+        """
+        获取资产负债表数据
+
+        Args:
+            symbol: 6位股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            DataFrame with balance sheet data
+        """
+        ts_symbol = self._add_suffix(symbol)
+        ts_start = self._convert_date_format(start_date) if start_date else '19700101'
+        ts_end = self._convert_date_format(end_date) if end_date else '20500101'
+
+        # 检查缓存
+        cache_key = self._get_cache_key('balancesheet', symbol=ts_symbol,
+                                        start=ts_start, end=ts_end)
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        # 获取数据
+        def fetch_data():
+            # Tushare balancesheet 接口
+            df = self.pro.balancesheet(
+                ts_code=ts_symbol,
+                start_date=ts_start,
+                end_date=ts_end
+            )
+            return df
+
+        df = self._retry_request(fetch_data)
+
+        if df is not None and not df.empty:
+            # 缓存
+            self._set_cache(cache_key, df)
+
+        return df if df is not None else pd.DataFrame()
+
+    def get_profit_sheet(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None
+    ) -> pd.DataFrame:
+        """
+        获取利润表数据
+
+        Args:
+            symbol: 6位股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            DataFrame with profit sheet data
+        """
+        ts_symbol = self._add_suffix(symbol)
+        ts_start = self._convert_date_format(start_date) if start_date else '19700101'
+        ts_end = self._convert_date_format(end_date) if end_date else '20500101'
+
+        # 检查缓存
+        cache_key = self._get_cache_key('profit', symbol=ts_symbol,
+                                        start=ts_start, end=ts_end)
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        # 获取数据
+        def fetch_data():
+            # Tushare income 接口
+            df = self.pro.income(
+                ts_code=ts_symbol,
+                start_date=ts_start,
+                end_date=ts_end
+            )
+            return df
+
+        df = self._retry_request(fetch_data)
+
+        if df is not None and not df.empty:
+            # 缓存
+            self._set_cache(cache_key, df)
+
+        return df if df is not None else pd.DataFrame()

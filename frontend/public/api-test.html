@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API测试</title>
+</head>
+<body>
+    <h1>API连接测试</h1>
+    <button onclick="testHealth()">测试健康检查</button>
+    <button onclick="testCommittee()">测试投委会API</button>
+    <div id="result"></div>
+
+    <script>
+        const API_BASE = 'http://localhost:8004';
+
+        async function testHealth() {
+            const result = document.getElementById('result');
+            result.innerHTML = '正在测试...';
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+                result.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            } catch (error) {
+                result.innerHTML = `错误: ${error.message}`;
+            }
+        }
+
+        async function testCommittee() {
+            const result = document.getElementById('result');
+            result.innerHTML = '正在测试投委会API... (请等待30-60秒)';
+            try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 180000); // 3 minutes
+
+                const response = await fetch(`${API_BASE}/api/v1/committee/meeting`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ symbol: '002353' }),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeout);
+                const data = await response.json();
+                result.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            } catch (error) {
+                result.innerHTML = `错误: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>

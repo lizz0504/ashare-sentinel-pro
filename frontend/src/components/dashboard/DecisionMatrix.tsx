@@ -18,32 +18,32 @@ export function DecisionMatrix({ technical, fundamental }: DecisionMatrixProps) 
     if (safeTechnical > 50 && safeFundamental > 50) return {
       label: "强烈买入区",
       emoji: "🌟",
-      description: "技术面与基本面共振",
-      advice: "可长期持有，逢低加仓",
+      description: "AI投委会一致看好",
+      advice: "成长与价值共振，可长期持有",
       bgColor: "bg-emerald-50/50",
       textColor: "text-emerald-700"
     }
     if (safeTechnical < 50 && safeFundamental > 50) return {
       label: "左侧埋伏区",
       emoji: "👁️",
-      description: "基本面优秀，等待技术面",
-      advice: "可分批建仓，耐心等待",
+      description: "价值面优秀，等待成长",
+      advice: "价值投资者可分批建仓",
       bgColor: "bg-blue-50/50",
       textColor: "text-blue-700"
     }
     if (safeTechnical > 50 && safeFundamental < 50) return {
       label: "趋势投机区",
       emoji: "🔥",
-      description: "技术面强势，基本面疲弱",
-      advice: "仅适合短线波段，严格止损",
+      description: "成长强势，价值疲弱",
+      advice: "仅适合短线，严格止损",
       bgColor: "bg-amber-50/50",
       textColor: "text-amber-700"
     }
     return {
       label: "建议观望区",
       emoji: "❄️",
-      description: "技术面与基本面双弱",
-      advice: "谨慎观望，等待时机",
+      description: "AI投委会整体悲观",
+      advice: "成长与价值双弱，等待时机",
       bgColor: "bg-slate-100/50",
       textColor: "text-slate-500"
     }
@@ -55,27 +55,28 @@ export function DecisionMatrix({ technical, fundamental }: DecisionMatrixProps) 
     <div className="w-full max-w-md mx-auto space-y-3">
       {/* 标题 */}
       <div className="text-center space-y-1">
-        <h3 className="text-sm font-semibold text-slate-300">多空双重属性决策矩阵</h3>
-        <p className="text-xs text-slate-500">技术面（纵轴）vs 基本面（横轴）</p>
+        <h3 className="text-sm font-semibold text-slate-300">AI投委会决策矩阵</h3>
+        <p className="text-xs text-slate-500">趋势/成长（纵轴）vs 价值/基本面（横轴）</p>
+        <p className="text-[10px] text-slate-600">基于4位AI专家加权计算</p>
       </div>
 
       {/* 矩阵说明 */}
       <div className="grid grid-cols-2 gap-2 text-xs">
         <div className="flex items-center gap-1 text-slate-400">
           <div className="w-2 h-2 rounded-full bg-amber-400"></div>
-          <span>左上：短线炒作机会</span>
+          <span>左上：成长强势，价值疲弱</span>
         </div>
         <div className="flex items-center gap-1 text-slate-400">
           <div className="w-2 h-2 rounded-full bg-emerald-400"></div>
-          <span>右上：长线投资机会</span>
+          <span>右上：成长与价值共振</span>
         </div>
         <div className="flex items-center gap-1 text-slate-400">
           <div className="w-2 h-2 rounded-full bg-slate-400"></div>
-          <span>左下：不建议操作</span>
+          <span>左下：双弱，建议观望</span>
         </div>
         <div className="flex items-center gap-1 text-slate-400">
           <div className="w-2 h-2 rounded-full bg-blue-400"></div>
-          <span>右下：价值投资机会</span>
+          <span>右下：价值优秀，左侧埋伏</span>
         </div>
       </div>
 
@@ -110,10 +111,10 @@ export function DecisionMatrix({ technical, fundamental }: DecisionMatrixProps) 
 
         {/* 轴标签 - 更清晰 */}
         <div className="absolute top-1 left-1/2 -translate-x-1/2 text-xs font-semibold text-slate-300 bg-slate-800/90 px-2 rounded border border-slate-600">
-          基本面 弱 → 强
+          价值/基本面 弱 → 强
         </div>
         <div className="absolute left-1 top-1/2 -translate-y-1/2 -rotate-90 text-xs font-semibold text-slate-300 bg-slate-800/90 px-2 rounded border border-slate-600 whitespace-nowrap">
-          技术面 弱 → 强
+          趋势/成长 弱 → 强
         </div>
 
         {/* 中线 */}
@@ -140,13 +141,13 @@ export function DecisionMatrix({ technical, fundamental }: DecisionMatrixProps) 
         {/* Tooltip */}
         {isAnalyzing ? (
           <div className="absolute bottom-2 left-2 bg-slate-800/90 text-slate-300 text-xs px-2 py-1 rounded">
-            分析中...
+            AI投委会分析中...
           </div>
         ) : (
           <div
             className="absolute bottom-2 left-2 bg-slate-800/90 text-slate-300 text-xs px-2 py-1 rounded opacity-0 hover:opacity-100 transition-opacity pointer-events-auto"
           >
-            技术面: {safeTechnical} | 基本面: {safeFundamental}
+            趋势/成长: {safeTechnical} | 价值/基本面: {safeFundamental}
           </div>
         )}
       </div>

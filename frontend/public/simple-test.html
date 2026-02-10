@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>简单测试</title>
+</head>
+<body>
+    <h1>API连接简单测试</h1>
+    <button onclick="test1()">测试1: 健康检查</button>
+    <button onclick="test2()">测试2: 完整API</button>
+    <div id="result"></div>
+
+    <script>
+        const API_BASE = 'http://localhost:8004';
+
+        function log(msg) {
+            const div = document.getElementById('result');
+            div.innerHTML += '<div>' + msg + '</div>';
+            console.log(msg);
+        }
+
+        async function test1() {
+            log('=== 测试1开始 ===');
+            try {
+                log('发送请求到: ' + API_BASE + '/health');
+                const response = await fetch(API_BASE + '/health');
+                log('Status: ' + response.status);
+                const data = await response.json();
+                log('结果: ' + JSON.stringify(data));
+                log('✅ 测试1成功');
+            } catch (error) {
+                log('❌ 测试1失败: ' + error.message);
+            }
+        }
+
+        async function test2() {
+            log('=== 测试2开始 ===');
+            log('⚠️ 这个测试需要30-60秒，请耐心等待...');
+            try {
+                log('发送请求到: ' + API_BASE + '/api/v1/committee/meeting');
+                log('请求体: {"symbol": "002353"}');
+
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 180000);
+
+                const response = await fetch(API_BASE + '/api/v1/committee/meeting', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ symbol: '002353' }),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+                log('Status: ' + response.status);
+
+                if (response.ok) {
+                    const data = await response.json();
+                    log('✅ 测试2成功');
+                    log('股票: ' + data.stock_name);
+                    log('决策: ' + data.analysis.final_decision.final_decision);
+                    log('建议仓位: ' + data.analysis.final_decision.suggested_position);
+                } else {
+                    log('❌ HTTP错误: ' + response.status);
+                    const text = await response.text();
+                    log('错误详情: ' + text);
+                }
+            } catch (error) {
+                log('❌ 测试2失败: ' + error.message);
+                log('错误名称: ' + error.name);
+            }
+        }
+    </script>
+</body>
+</html>

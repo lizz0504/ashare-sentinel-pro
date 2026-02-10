@@ -3,7 +3,33 @@
     "allow": [
       "Bash(npm install:*)",
       "Bash(python:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(tee:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(npm run build:*)",
+      "Bash(tasklist:*)",
+      "Bash(ls:*)",
+      "Bash(if exist .next rmdir /s /q .next)",
+      "Bash(if exist node_modules.cache rmdir /s /q node_modules.cache)",
+      "Bash(npm start)",
+      "Bash(taskkill:*)",
+      "Bash(powershell:*)",
+      "Bash(start:*)",
+      "Bash(wmic:*)",
+      "Bash(npm run dev:*)",
+      "Bash(Get-Process -Id 18256 -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object:*)",
+      "Bash(Get-Process -Id 39188 -ErrorAction SilentlyContinue)",
+      "Bash(ping:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git tag:*)",
+      "Bash(git push:*)",
+      "Bash(pip install:*)",
+      "Bash(docker:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(kill:*)"
     ]
   }
 }

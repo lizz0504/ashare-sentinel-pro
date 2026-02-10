@@ -11,20 +11,22 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-# 数据源选择：优先使用 Tushare，降级到 Baostock，最后是 AkShare
-_USE_TUSHARE = True  # 首要数据源
-_USE_BAOSTOCK = True  # 备选数据源
+# 数据源选择：Tushare → Baostock → AkShare
+# 优先级固定：Tushare优先，然后Baostock，最后AkShare（所有类型的备选）
+# 注意：优先级由 app.core.config.DATA_SOURCE_PRIORITY 统一管理
 _data_fetcher = None
+_tushare_available = False
 
 # Always import AkShare as fallback
 import akshare as ak
+_akshare_available = True
 
 # Import Baostock for A-share data
 try:
-    from app.services.market_service_baostock import get_financials_baostock
-    _BAOSTOCK_AVAILABLE = True
+    from app.services.market_service_baostock import get_financials_baostock, get_stock_info_baostock
+    _baostock_available = True
 except ImportError:
-    _BAOSTOCK_AVAILABLE = False
+    _baostock_available = False
 
 # 禁用代理，避免网络连接问题
 os.environ['HTTP_PROXY'] = ''
@@ -50,27 +52,56 @@ try:
 except Exception as e:
     print(f"[WARN] Failed to disable proxy: {e}")
 
-# 检查是否完全禁用 Tushare
+# ============================================
+# 数据源配置管理（固定优先级）
+# ============================================
+# 优先级：Tushare → Baostock → AkShare (备选)
+# 详细配置：见 app.core.config.DATA_SOURCE_PRIORITY
+print("[DATA SOURCE] Priority: Tushare → Baostock → AkShare (备选)")
+
+# 检查Tushare配置
 try:
     from app.core.config import settings
     if getattr(settings, 'DISABLE_TUSHARE', False):
-        _USE_TUSHARE = False
-        print("[DATA SOURCE] Tushare disabled by configuration (DISABLE_TUSHARE=True)")
+        _tushare_available = False
+        print("[DATA SOURCE] Tushare DISABLED by configuration (DISABLE_TUSHARE=True)")
+    elif not getattr(settings, 'TUSHARE_TOKEN', None):
+        _tushare_available = False
+        print("[DATA SOURCE] Tushare unavailable: TUSHARE_TOKEN not set")
     else:
-        from app.services.data_fetcher import DataFetcher
-        _USE_TUSHARE = True
-        print("[DATA SOURCE] DataFetcher module found - Tushare Pro support available")
+        # 尝试导入DataFetcher
+        try:
+            from app.services.data_fetcher import DataFetcher
+            _tushare_available = True
+            print("[DATA SOURCE] Tushare ENABLED (Token configured, DataFetcher available)")
+        except ImportError:
+            _tushare_available = False
+            print("[DATA SOURCE] Tushare unavailable: DataFetcher module not found")
 except ImportError:
-    print("[DATA SOURCE] DataFetcher module not found - will use AkShare only")
+    _tushare_available = True  # 默认启用
+    print("[DATA SOURCE] Config not loaded, using Tushare if available")
+
+# Baostock可用性
+print(f"[DATA SOURCE] Baostock {'ENABLED' if _baostock_available else 'DISABLED'}")
 
 # ============================================
 # 缓存配置
 # ============================================
 _CACHE = {}
-_CACHE_TTL = 300  # 缓存5分钟
+
+# 从配置读取缓存TTL，默认300秒
+try:
+    from app.core.config import settings
+    _CACHE_TTL = getattr(settings, 'CACHE_TTL', 300)
+    _CACHE_ENABLED = getattr(settings, 'CACHE_ENABLED', True)
+except ImportError:
+    _CACHE_TTL = 300
+    _CACHE_ENABLED = True
 
 def _get_cache_key(key: str) -> tuple:
     """从缓存获取数据"""
+    if not _CACHE_ENABLED:
+        return None
     if key in _CACHE:
         data, timestamp = _CACHE[key]
         if time.time() - timestamp < _CACHE_TTL:
@@ -97,8 +128,12 @@ except ImportError:
 # ============================================
 def _get_data_fetcher():
     """获取或创建 DataFetcher 实例"""
-    global _data_fetcher, _USE_TUSHARE
-    if _USE_TUSHARE and _data_fetcher is None:
+    global _data_fetcher, _tushare_available
+
+    if not _tushare_available:
+        return None
+
+    if _data_fetcher is None:
         try:
             # 从配置读取 Tushare Token
             from app.core.config import settings
@@ -108,14 +143,12 @@ def _get_data_fetcher():
                 _data_fetcher = DataFetcher(token=token)
                 print("[DATA SOURCE] Tushare Pro initialized successfully (Token configured)")
             else:
-                print("[DATA SOURCE] TUSHARE_TOKEN not set in environment, falling back to AkShare")
-                _USE_TUSHARE = False
-                import akshare as ak
+                print("[DATA SOURCE] TUSHARE_TOKEN not set in environment")
+                _tushare_available = False
         except Exception as e:
             print(f"[DATA SOURCE] Failed to initialize Tushare Pro: {e}")
-            print(f"[DATA SOURCE] Falling back to AkShare")
-            _USE_TUSHARE = False
-            import akshare as ak
+            _tushare_available = False
+
     return _data_fetcher
 
 
@@ -222,7 +255,7 @@ def _get_realtime_price(symbol: str, market: str) -> Optional[float]:
             end_date = datetime.now()
             end_str = end_date.strftime('%Y-%m-%d')
 
-            if _USE_TUSHARE:
+            if _tushare_available:
                 # 使用 Tushare
                 fetcher = _get_data_fetcher()
                 if fetcher:
@@ -242,7 +275,7 @@ def _get_realtime_price(symbol: str, market: str) -> Optional[float]:
                     period="daily",
                     end_date=end_date.strftime('%Y%m%d'),
                     adjust="",
-                    max_retries=2
+                    max_retries=None  # 使用配置中的默认值
                 )
                 if hist_df is not None and not hist_df.empty:
                     price = float(hist_df.iloc[-1]['收盘'])
@@ -290,7 +323,7 @@ def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
                 else:
                     xq_symbol = f"SZ{symbol}"
 
-            info_df = ak.stock_individual_basic_info_xq(symbol=xq_symbol, timeout=5)
+            info_df = ak.stock_individual_basic_info_xq(symbol=xq_symbol, timeout=timeout)
             if info_df is not None and not info_df.empty:
                 info_dict = dict(zip(info_df['item'], info_df['value']))
 
@@ -316,7 +349,7 @@ def _fetch_stock_detail_from_akshare(symbol: str) -> Optional[Dict]:
             print(f"[WARN] 雪球接口失败: {e}")
 
         # 方案2: 尝试 Tushare
-        if _USE_TUSHARE:
+        if _tushare_available:
             fetcher = _get_data_fetcher()
             if fetcher:
                 print(f"[INFO] Trying Tushare for {symbol}...")
@@ -392,6 +425,13 @@ def get_stock_info(symbol: str, fetch_price: bool = True, max_retries: int = 0) 
     """
     获取股票基本信息（含实时股价）
 
+    数据源优先级（由 app.core.config.DATA_TYPE_PRIORITY["stock_info"] 定义）：
+        1. Tushare (主要数据源)
+        2. 本地数据库 (快速缓存)
+        3. 硬编码数据库 (降级)
+        4. Baostock (备选)
+        5. AkShare (最后备选)
+
     Args:
         symbol: 股票代码
         fetch_price: 是否获取实时股价（默认True）
@@ -421,8 +461,21 @@ def get_stock_info(symbol: str, fetch_price: bool = True, max_retries: int = 0) 
     stock_sector = None
     stock_industry = None
 
-    # 1. 优先尝试新的股票数据库文件
-    if _USE_STOCK_DB and market == 'A':
+    # 1. 优先尝试 Tushare 获取股票基本信息
+    if market == 'A' and _data_fetcher:
+        print(f"[INFO] Trying Tushare for {symbol}...")
+        try:
+            tushare_data = _data_fetcher.get_stock_info(symbol)
+            if tushare_data and tushare_data.get('name') != symbol:
+                print(f"[OK] Got from Tushare: {tushare_data.get('name')}, industry={tushare_data.get('industry')}, sector={tushare_data.get('sector')}")
+                stock_name = tushare_data['name']
+                stock_sector = tushare_data.get('sector', '未知')
+                stock_industry = tushare_data.get('industry', '未知')
+        except Exception as e:
+            print(f"[WARN] Tushare failed for {symbol}: {e}")
+
+    # 2. 回退到本地数据库文件（快速缓存）
+    if not stock_name and _USE_STOCK_DB and market == 'A':
         stock_data = get_stock_from_db(lookup_key)
         if stock_data:
             print(f"[DEBUG] Found in stock DB file: {lookup_key}")
@@ -430,7 +483,7 @@ def get_stock_info(symbol: str, fetch_price: bool = True, max_retries: int = 0) 
             stock_sector = stock_data.get('sector', '未知')
             stock_industry = stock_data.get('industry', '未知')
 
-    # 2. 回退到旧的硬编码数据库
+    # 3. 回退到旧的硬编码数据库
     if not stock_name and lookup_key in _STOCK_DATABASE:
         local_data = _STOCK_DATABASE[lookup_key]
         print(f"[DEBUG] Found in fallback DB: {lookup_key}")
@@ -438,7 +491,21 @@ def get_stock_info(symbol: str, fetch_price: bool = True, max_retries: int = 0) 
         stock_sector = local_data['sector']
         stock_industry = local_data['industry']
 
-    # 3. 如果本地都没有，尝试从AkShare获取
+    # 4. 备选：从 Baostock 获取
+    if not stock_name or stock_sector == "其他" or stock_industry == "其他":
+        if _baostock_available:
+            print(f"[INFO] Trying Baostock for {symbol}...")
+            try:
+                baostock_data = get_stock_info_baostock(symbol)
+                if baostock_data:
+                    stock_name = baostock_data['name']
+                    stock_sector = baostock_data.get('sector', '未知')
+                    stock_industry = baostock_data.get('industry', '未知')
+                    print(f"[OK] Got data from Baostock for {symbol}")
+            except Exception as e:
+                print(f"[WARN] Baostock failed for {symbol}: {e}")
+
+    # 5. 最后备选：从 AkShare 获取
     if not stock_name or stock_sector == "其他" or stock_industry == "其他":
         print(f"[INFO] Trying AkShare for {symbol}...")
         akshare_data = _fetch_stock_detail_from_akshare(normalized_symbol)
@@ -448,14 +515,14 @@ def get_stock_info(symbol: str, fetch_price: bool = True, max_retries: int = 0) 
             stock_industry = akshare_data['industry']
             print(f"[OK] Got data from AkShare for {symbol}")
 
-    # 4. 如果还是没有，返回默认值
+    # 6. 如果还是没有，返回默认值
     if not stock_name:
-        print(f"[WARN] Not found in any DB, using default for {symbol}")
+        print(f"[WARN] Not found in any data source, using default for {symbol}")
         stock_name = symbol.upper()
         stock_sector = "其他"
         stock_industry = "其他"
 
-    # 5. 获取实时股价（如果需要）
+    # 7. 获取实时股价（如果需要）
     current_price = None
     if fetch_price and market == 'A':
         current_price = _get_realtime_price(normalized_symbol, market)
@@ -490,7 +557,7 @@ def get_weekly_performance(symbol: str, days: int = 7) -> Optional[Dict]:
     start_date = end_date - timedelta(days=days + 10)
 
     try:
-        if _USE_TUSHARE:
+        if _tushare_available:
             # 使用 Tushare
             fetcher = _get_data_fetcher()
             if fetcher:
@@ -573,8 +640,23 @@ def validate_symbol(symbol: str) -> bool:
 # ============================================
 
 
-def _retry_akshare_call(func, *args, max_retries=3, timeout=15, **kwargs):
+def _retry_akshare_call(func, *args, max_retries=None, timeout=None, **kwargs):
     """带重试机制的 AkShare 调用"""
+    # 从配置读取默认值
+    try:
+        from app.core.config import settings
+        if max_retries is None:
+            max_retries = getattr(settings, 'API_MAX_RETRIES', 3)
+        if timeout is None:
+            timeout = getattr(settings, 'API_TIMEOUT_DEFAULT', 15)
+        retry_delay = getattr(settings, 'API_RETRY_DELAY', 2)
+    except ImportError:
+        if max_retries is None:
+            max_retries = 3
+        if timeout is None:
+            timeout = 15
+        retry_delay = 2
+
     last_error = None
     for attempt in range(max_retries):
         try:
@@ -585,7 +667,7 @@ def _retry_akshare_call(func, *args, max_retries=3, timeout=15, **kwargs):
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 3  # 增加等待时间到3秒
+                wait_time = retry_delay * (attempt + 1)
                 print(f"[WARN] API call failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
                 time.sleep(wait_time)
             else:
@@ -616,7 +698,7 @@ def get_market_sentiment() -> Optional[Dict]:
 
         # 获取沪深300历史数据
         hist_df = None
-        if _USE_TUSHARE:
+        if _tushare_available:
             fetcher = _get_data_fetcher()
             if fetcher:
                 try:
@@ -879,7 +961,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         index_df = None
 
         # 1. 首先尝试 Tushare
-        if _USE_TUSHARE:
+        if _tushare_available:
             try:
                 fetcher = _get_data_fetcher()
                 if fetcher:
@@ -908,7 +990,7 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
                 print(f"[WARN] Tushare failed, trying Baostock: {e}")
 
         # 2. 备选：尝试 Baostock
-        if (stock_df is None or stock_df.empty) and _BAOSTOCK_AVAILABLE:
+        if (stock_df is None or stock_df.empty) and _baostock_available:
             try:
                 print(f"[DATA SOURCE] Using Baostock for {symbol}")
                 stock_df = _get_baostock_data(symbol, start_date, end_date)
@@ -1311,7 +1393,8 @@ def get_market_snapshot(symbol: str) -> Optional[Dict]:
         print(f"[INFO] Fetching market snapshot for {symbol}...")
 
         # 获取实时行情数据
-        spot_info = _retry_akshare_call(ak.stock_zh_a_spot_em, timeout=10)
+        timeout = getattr(settings, 'API_TIMEOUT_FAST', 10) if 'settings' in dir() else 10
+        spot_info = _retry_akshare_call(ak.stock_zh_a_spot_em, timeout=timeout)
 
         if spot_info is None or spot_info.empty:
             print(f"[WARN] Failed to fetch spot data for {symbol}")
@@ -1404,7 +1487,7 @@ def get_news_titles(symbol: str, limit: int = 5) -> list:
         # 使用AkShare获取股票新闻
         news_data = _retry_akshare_call(
             lambda: ak.stock_news_em(symbol=symbol),
-            timeout=10
+            timeout=None  # 使用配置中的默认值
         )
         if news_data is not None and not news_data.empty:
             return news_data['新闻标题'].head(limit).tolist()
@@ -1421,6 +1504,11 @@ def get_news_titles(symbol: str, limit: int = 5) -> list:
 def calculate_financial_metrics(symbol: str) -> Dict:
     """
     计算股票的硬核财务指标，为 AI 投委会提供数据支撑
+
+    数据源优先级（由 app.core.config.DATA_TYPE_PRIORITY["financial_metrics"] 定义）：
+        1. Tushare (主要数据源)
+        2. Baostock (备选)
+        3. AkShare (最后备选)
 
     支持 A 股财务指标计算：
     - Warren Buffett (价值因子): ROE, Debt-to-Equity, FCF Yield
@@ -1475,7 +1563,7 @@ def calculate_financial_metrics(symbol: str) -> Dict:
         stock_df = None
         index_df = None
 
-        if _USE_TUSHARE:
+        if _tushare_available:
             try:
                 fetcher = _get_data_fetcher()
                 if fetcher:
@@ -1551,7 +1639,7 @@ def calculate_financial_metrics(symbol: str) -> Dict:
         fundamental_data = {}
 
         # 优先使用 Tushare 获取财务指标
-        if _USE_TUSHARE:
+        if _tushare_available:
             try:
                 fetcher = _get_data_fetcher()
                 if fetcher:
@@ -1594,8 +1682,8 @@ def calculate_financial_metrics(symbol: str) -> Dict:
             except Exception as e:
                 print(f"[WARN] Tushare fundamental metrics failed: {e}")
 
-        # 备选：使用 Baostock 获取财务指标
-        if _BAOSTOCK_AVAILABLE and _USE_BAOSTOCK and not fundamental_data.get('pe_ratio'):
+        # 2. 备选：使用 Baostock 获取财务指标
+        if _baostock_available and not fundamental_data.get('pe_ratio'):
             try:
                 print(f"[DATA SOURCE] Using Baostock for {symbol} financial metrics")
                 baostock_result = get_financials_baostock(symbol)
@@ -1619,6 +1707,7 @@ def calculate_financial_metrics(symbol: str) -> Dict:
             except Exception as e:
                 print(f"[WARN] Baostock financial metrics failed: {e}")
 
+        # 3. 最后备选：使用 AkShare 获取财务指标
         try:
             # 获取个股信息 (包含 PE, PB)
             stock_info = ak.stock_zh_a_spot_em()
@@ -2042,8 +2131,8 @@ def get_news_titles(symbol: str, limit: int = 5) -> str:
         news_df = _retry_akshare_call(
             ak.stock_news_em,
             symbol=normalized_symbol,
-            max_retries=2,
-            timeout=10
+            max_retries=None,  # 使用配置中的默认值
+            timeout=None  # 使用配置中的默认值
         )
 
         if news_df is None or news_df.empty:

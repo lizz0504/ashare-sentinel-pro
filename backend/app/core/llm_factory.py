@@ -2,7 +2,7 @@
 """
 LLM Factory - 多模型AI调用工厂
 
-支持: Qwen / DeepSeek / Zhipu
+支持: Qwen / DeepSeek / Zhipu / Volcano
 自动降级处理
 """
 
@@ -20,21 +20,18 @@ class LLMFactory:
 
     # API端点
     APIS = {
-        "qwen": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
         "deepseek": "https://api.deepseek.com/v1/chat/completions",
         "zhipu": "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     }
 
     # 模型名称
     MODELS = {
-        "qwen": "qwen-max",
         "deepseek": "deepseek-chat",
         "zhipu": "glm-4"
     }
 
     # 中文显示名
     NAMES = {
-        "qwen": "通义千问",
         "deepseek": "DeepSeek",
         "zhipu": "智谱GLM"
     }
@@ -49,7 +46,6 @@ class LLMFactory:
     ) -> str:
         """快速调用模型"""
         caller = {
-            "qwen": cls._call_qwen,
             "deepseek": cls._call_deepseek,
             "zhipu": cls._call_zhipu
         }.get(model)
@@ -79,37 +75,12 @@ class LLMFactory:
         return None
 
     @classmethod
-    async def _call_qwen(cls, system: str, user: str, timeout: int) -> str:
-        """调用通义千问"""
-        api_key = getattr(settings, 'DASHSCOPE_API_KEY', None)
-        if not api_key:
-            return "[错误] 未配置 DASHSCOPE_API_KEY"
-
-        data = await cls._call_api(
-            cls.APIS["qwen"],
-            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            {
-                "model": cls.MODELS["qwen"],
-                "input": {"messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ]},
-                "parameters": {"max_tokens": 1000, "temperature": 0.8}
-            },
-            timeout
-        )
-
-        if data and "output" in data:
-            return data["output"].get("text", "[错误] 响应格式异常")
-        return "[错误] Qwen调用失败"
-
-    @classmethod
     async def _call_deepseek(cls, system: str, user: str, timeout: int) -> str:
         """调用DeepSeek"""
         api_key = getattr(settings, 'DEEPSEEK_API_KEY', None)
         if not api_key:
-            logger.warning("DeepSeek未配置，降级到Qwen")
-            return await cls._call_qwen(system, user, timeout)
+            logger.warning("DeepSeek未配置，降级到Zhipu")
+            return await cls._call_zhipu(system, user, timeout)
 
         data = await cls._call_api(
             cls.APIS["deepseek"],
@@ -135,8 +106,8 @@ class LLMFactory:
         """调用智谱GLM"""
         api_key = getattr(settings, 'ZHIPU_API_KEY', None)
         if not api_key:
-            logger.warning("智谱未配置，降级到Qwen")
-            return await cls._call_qwen(system, user, timeout)
+            logger.warning("智谱未配置，降级到DeepSeek")
+            return await cls._call_deepseek(system, user, timeout)
 
         data = await cls._call_api(
             cls.APIS["zhipu"],
@@ -166,10 +137,8 @@ class LLMFactory:
     def get_available(cls) -> list:
         """获取可用模型列表"""
         models = []
-        if getattr(settings, 'DASHSCOPE_API_KEY', None):
-            models.append("qwen")
         if getattr(settings, 'DEEPSEEK_API_KEY', None):
             models.append("deepseek")
         if getattr(settings, 'ZHIPU_API_KEY', None):
             models.append("zhipu")
-        return models or ["qwen"]
+        return models or ["deepseek"]

@@ -7,9 +7,11 @@ import { Trash2, Loader2, RefreshCw, Sparkles, Zap } from "lucide-react"
 
 // 导入分析历史工具
 import {
+  getMergedAnalysisHistory,
   getAnalysisHistory,
-  deleteAnalysisRecord,
+  deleteStockAllRecords,
   clearAnalysisHistory,
+  getStockSourceTypes,
   type AnalysisRecord
 } from "@/lib/utils/analysisHistory"
 
@@ -42,6 +44,12 @@ export default function SmartPoolPage() {
   const [technicalData, setTechnicalData] = useState<Record<string, TechnicalAnalysis>>({})
   const [failedTechnicalLoads, setFailedTechnicalLoads] = useState<Set<string>>(new Set())
   const [isLoading, setIsLoading] = useState(true)
+  const [mounted, setMounted] = useState(false)
+
+  // 确保只在客户端挂载后渲染
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   // ============================================
   // 数据加载函数
@@ -50,9 +58,14 @@ export default function SmartPoolPage() {
   /**
    * 加载技术分析数据
    */
-  const loadTechnicalAnalysis = async (symbol: string): Promise<TechnicalAnalysis | null> => {
+  const loadTechnicalAnalysis = async (symbol: string, force: boolean = false): Promise<TechnicalAnalysis | null> => {
     try {
-      const response = await fetch(`${API_BASE}/api/v1/market/technical/${symbol}`)
+      // 添加缓存破坏参数，确保获取最新数据
+      const cacheBuster = Date.now()
+      const url = `${API_BASE}/api/v1/market/technical/${symbol}?_t=${cacheBuster}${force ? '&force=true' : ''}`
+      const response = await fetch(url, {
+        cache: 'no-store'
+      })
       if (response.ok) {
         const data = await response.json()
         setTechnicalData(prev => ({ ...prev, [symbol]: data }))
@@ -68,22 +81,23 @@ export default function SmartPoolPage() {
   /**
    * 加载智能股票池数据
    */
-  const loadSmartPool = async () => {
+  const loadSmartPool = async (force: boolean = false) => {
     setIsLoading(true)
-    const history = getAnalysisHistory()
+    // 使用合并后的历史记录，自动合并同一只股票
+    const mergedHistory = getMergedAnalysisHistory()
 
-    setSmartPool(history)
+    setSmartPool(mergedHistory)
     setFailedTechnicalLoads(new Set())
 
     // 检查是否有有效的股票需要加载
-    if (!history || history.length === 0) {
+    if (!mergedHistory || mergedHistory.length === 0) {
       console.log("[SmartPool] No stocks to load")
       setIsLoading(false)
       return
     }
 
     // 为智能股票池的股票加载技术分析
-    const symbolsToLoad = history
+    const symbolsToLoad = mergedHistory
       .filter(stock => stock.symbol && /^\d{6}$/.test(stock.symbol))
       .map(stock => stock.symbol)
 
@@ -101,7 +115,7 @@ export default function SmartPoolPage() {
       const batch = symbolsToLoad.slice(i, i + 3)
       await Promise.all(batch.map(async (symbol) => {
         try {
-          const result = await loadTechnicalAnalysis(symbol)
+          const result = await loadTechnicalAnalysis(symbol, force)
           if (!result) {
             newFailedLoads.add(symbol)
           }
@@ -176,8 +190,11 @@ export default function SmartPoolPage() {
   // Actions
   // ============================================
 
-  const handleRefresh = () => {
-    loadSmartPool()
+  const handleRefresh = async () => {
+    // 强制重新加载，清除旧的技术数据和后端缓存
+    setTechnicalData({})
+    setFailedTechnicalLoads(new Set())
+    await loadSmartPool(true)  // force=true 强制刷新
   }
 
   const handleClearAll = () => {
@@ -189,9 +206,9 @@ export default function SmartPoolPage() {
     }
   }
 
-  const handleDeleteStock = (id: string) => {
-    deleteAnalysisRecord(id)
-    loadSmartPool()
+  const handleDeleteStock = (symbol: string) => {
+    deleteStockAllRecords(symbol)
+    loadSmartPool(false)  // 不强制刷新
   }
 
   const handleRetryTechnical = async (symbol: string) => {
@@ -209,10 +226,23 @@ export default function SmartPoolPage() {
   // Render
   // ============================================
 
-  const dashboardCount = smartPool.filter(s => s.type === 'dashboard').length
-  const icCount = smartPool.filter(s => s.type === 'ic_meeting').length
+  // 基于原始历史记录计算统计数据
+  const originalHistory = getAnalysisHistory()
+  const dashboardCount = originalHistory.filter(s => s.type === 'dashboard').length
+  const icCount = originalHistory.filter(s => s.type === 'ic_meeting').length
   const buyCount = smartPool.filter(s => s.verdict_chinese.includes('买入')).length
   const sellCount = smartPool.filter(s => s.verdict_chinese.includes('卖出')).length
+
+  // 服务端渲染时显示加载状态，避免水合错误
+  if (!mounted) {
+    return (
+      <div className="space-y-6 p-8">
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6 p-8">
@@ -318,6 +348,10 @@ export default function SmartPoolPage() {
       ) : (
         <div className="space-y-4">
           {smartPool.map((stock) => {
+            // 获取股票的实际来源类型
+            const sourceTypes = getStockSourceTypes(stock.symbol)
+            const hasBothSources = sourceTypes.hasDashboard && sourceTypes.hasIC
+
             const tech = technicalData[stock.symbol]
             const hasFailed = failedTechnicalLoads.has(stock.symbol)
             const actionBadge = getActionSignalBadge(tech?.action_signal)
@@ -334,13 +368,27 @@ export default function SmartPoolPage() {
                     <div className="flex-1">
                       {/* Stock Header */}
                       <div className="flex items-center gap-3 mb-4">
-                        <span className={`px-3 py-1 rounded-lg text-sm font-semibold ${
-                          stock.type === 'dashboard'
-                            ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                            : 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
-                        }`}>
-                          {stock.type === 'dashboard' ? '📈 Dashboard' : '👥 IC投委会'}
-                        </span>
+                        {hasBothSources ? (
+                          // 显示合并的来源标签
+                          <div className="flex items-center gap-2">
+                            <span className="px-2 py-1 rounded-lg text-sm font-semibold bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                              📈 Dashboard
+                            </span>
+                            <span className="text-slate-500">+</span>
+                            <span className="px-2 py-1 rounded-lg text-sm font-semibold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                              👥 IC投委会
+                            </span>
+                          </div>
+                        ) : (
+                          // 显示单个来源标签
+                          <span className={`px-3 py-1 rounded-lg text-sm font-semibold ${
+                            stock.type === 'dashboard'
+                              ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                              : 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
+                          }`}>
+                            {stock.type === 'dashboard' ? '📈 Dashboard' : '👥 IC投委会'}
+                          </span>
+                        )}
                         <h3 className="text-xl font-bold text-slate-100">{stock.stock_name}</h3>
                         <span className="text-slate-400 font-mono">({stock.symbol})</span>
                       </div>
@@ -350,9 +398,56 @@ export default function SmartPoolPage() {
                         <span className="text-2xl font-semibold text-slate-100">
                           ¥{stock.current_price.toFixed(2)}
                         </span>
-                        <span className={`px-3 py-1 rounded-lg text-sm font-semibold ${getVerdictBadgeClass(stock.verdict_chinese)}`}>
-                          {stock.verdict_chinese} {stock.conviction_stars}
-                        </span>
+
+                        {/* 当有多个来源时，显示综合判决详情 */}
+                        {hasBothSources && stock.merged_verdict ? (
+                          <div className="flex items-center gap-3 flex-wrap">
+                            {/* Dashboard 原始判决 */}
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-slate-500">Dashboard:</span>
+                              <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${
+                                stock.merged_verdict.dashboard_verdict !== 'N/A' && stock.merged_verdict.dashboard_verdict?.includes('买入')
+                                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                                  : stock.merged_verdict.dashboard_verdict !== 'N/A' && stock.merged_verdict.dashboard_verdict?.includes('卖出')
+                                  ? 'bg-red-500/20 text-red-400 border-red-500/30'
+                                  : 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+                              }`}>
+                                {stock.merged_verdict.dashboard_verdict}
+                              </span>
+                            </div>
+
+                            {/* IC 原始判决 */}
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-slate-500">IC投委会:</span>
+                              <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${
+                                stock.merged_verdict.ic_verdict !== 'N/A' && stock.merged_verdict.ic_verdict?.includes('买入')
+                                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                                  : stock.merged_verdict.ic_verdict !== 'N/A' && stock.merged_verdict.ic_verdict?.includes('卖出')
+                                  ? 'bg-red-500/20 text-red-400 border-red-500/30'
+                                  : 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+                              }`}>
+                                {stock.merged_verdict.ic_verdict}
+                              </span>
+                            </div>
+
+                            {/* 分隔符 */}
+                            <span className="text-slate-600">→</span>
+
+                            {/* 综合终审判决 */}
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-amber-400 font-medium">终审:</span>
+                              <span className={`px-3 py-1 rounded-lg text-sm font-semibold ${getVerdictBadgeClass(stock.verdict_chinese)}`}>
+                                {stock.verdict_chinese} {stock.conviction_stars}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          // 单来源，直接显示判决
+                          <span className={`px-3 py-1 rounded-lg text-sm font-semibold ${getVerdictBadgeClass(stock.verdict_chinese)}`}>
+                            {stock.verdict_chinese} {stock.conviction_stars}
+                          </span>
+                        )}
+
                         <span className="text-sm text-slate-500">
                           技:{stock.technical_score ?? '-'} 基:{stock.fundamental_score ?? '-'}
                         </span>
@@ -445,7 +540,7 @@ export default function SmartPoolPage() {
                       size="sm"
                       variant="ghost"
                       className="text-red-400 hover:text-red-300 hover:bg-red-900/20"
-                      onClick={() => handleDeleteStock(stock.id)}
+                      onClick={() => handleDeleteStock(stock.symbol)}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>

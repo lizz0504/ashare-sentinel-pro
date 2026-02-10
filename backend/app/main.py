@@ -51,6 +51,8 @@ app.add_middleware(
         "http://127.0.0.1:3001",
         "http://localhost:3002",  # 备用端口
         "http://127.0.0.1:3002",
+        "http://localhost:3003",  # 备用端口
+        "http://127.0.0.1:3003",
         "http://localhost:3004",  # 备用端口
         "http://127.0.0.1:3004"
     ],
@@ -66,24 +68,42 @@ async def log_requests(request, call_next):
     """记录所有请求"""
     import sys
     import time
+    import traceback
+
     start_time = time.time()
 
     # 写入文件以确保输出
-    with open('request_log.txt', 'a', encoding='utf-8') as f:
-        f.write(f"[{time.time()}] {request.method} {request.url}\n")
-        f.flush()
+    try:
+        with open('request_log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"[{time.time()}] {request.method} {request.url}\n")
+            f.flush()
+    except Exception as e:
+        print(f"[ERROR] Failed to write to log: {e}", flush=True)
 
     print(f"[REQUEST] {request.method} {request.url}", flush=True)
     sys.stdout.flush()
 
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        print(f"[ERROR] Request failed: {e}", flush=True)
+        traceback.print_exc()
+        # Return error response
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "detail": traceback.format_exc()}
+        )
 
     process_time = (time.time() - start_time) * 1000
     print(f"[RESPONSE] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)", flush=True)
 
-    with open('request_log.txt', 'a', encoding='utf-8') as f:
-        f.write(f"[{time.time()}] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)\n")
-        f.flush()
+    try:
+        with open('request_log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"[{time.time()}] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)\n")
+            f.flush()
+    except Exception as e:
+        print(f"[ERROR] Failed to write to log: {e}", flush=True)
 
     return response
 
@@ -994,7 +1014,7 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
         stock_info = get_stock_info(request.symbol, fetch_price=False)
         stock_name = stock_info.get("name", request.symbol) if stock_info else request.symbol
 
-        # 2. 获取财务数据（优先使用 Tushare，降级到 Baostock）
+        # 2. 获取财务数据（优先级：Tushare → Baostock → AkShare）
         from app.services.market_service import calculate_financial_metrics, get_stock_technical_analysis
 
         # 尝试获取完整财务指标
@@ -1154,5 +1174,187 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "fundamental_score": 50
         }
 
+
+# =============================================================================
+# Guru Watcher - 大V交易信号监控 API
+# =============================================================================
+
+from app.services.guru_watcher import get_guru_watcher
+from app.schemas.guru import PlatformType
+
+
+class GuruProcessRequest(BaseModel):
+    """Guru信号处理请求"""
+    platform: str = "xueqiu"
+    limit: int = 20
+
+
+@app.get("/api/v1/guru/test")
+async def test_guru():
+    """测试Guru API是否工作"""
+    return {"status": "ok", "message": "Guru API is working"}
+
+@app.post("/api/v1/guru/process-feeds")
+async def process_guru_feeds(request: GuruProcessRequest):
+    """
+    处理大V订阅源并提取交易信号
+
+    Args:
+        request: 包含平台和限制参数的请求
+
+    Returns:
+        提取的交易信号列表
+    """
+    try:
+        print(f"[DEBUG] Guru API called with platform={request.platform}, limit={request.limit}")
+
+        # 转换平台类型（不区分大小写）
+        try:
+            platform = next(p for p in PlatformType if p.value.lower() == request.platform.lower())
+        except (StopIteration, ValueError):
+            platform = PlatformType.XUEQIU
+
+        print(f"[DEBUG] Platform converted to: {platform.value}")
+
+        # 获取服务实例
+        service = get_guru_watcher()
+
+        # 处理订阅源
+        signals = await service.process_feeds(platform=platform, limit=request.limit)
+
+        # 转换为响应格式
+        result = {
+            "total": len(signals),
+            "platform": platform.value,
+            "signals": [
+                {
+                    "id": s.id,
+                    "guru_name": s.guru_name,
+                    "platform": s.platform.value,
+                    "sentiment": s.sentiment.value,
+                    "action": s.action.value,
+                    "summary": s.summary,
+                    "mentioned_symbols": [
+                        {"symbol": ms.symbol, "name": ms.name}
+                        for ms in s.mentioned_symbols
+                    ],
+                    "trading_idea": s.trading_idea.dict() if s.trading_idea else None,
+                    "related_themes": s.related_themes,
+                    "key_factors": s.key_factors,
+                    "confidence_score": s.confidence_score,
+                    "publish_time": s.publish_time.isoformat() if s.publish_time else None,
+                }
+                for s in signals
+            ]
+        }
+
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/guru/signals")
+async def get_all_signals():
+    """
+    获取所有缓存的交易信号
+
+    Returns:
+        所有缓存的信号列表
+    """
+    try:
+        service = get_guru_watcher()
+
+        result = {
+            "total": len(service.signals_cache),
+            "signals": [
+                {
+                    "id": s.id,
+                    "guru_name": s.guru_name,
+                    "platform": s.platform.value,
+                    "sentiment": s.sentiment.value,
+                    "action": s.action.value,
+                    "summary": s.summary,
+                    "mentioned_symbols": [ms.symbol for ms in s.mentioned_symbols],
+                    "publish_time": s.publish_time.isoformat() if s.publish_time else None,
+                }
+                for s in service.signals_cache
+            ]
+        }
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/guru/signal/{symbol}")
+async def get_signal_by_symbol(symbol: str):
+    """
+    获取指定股票的聚合情绪分析
+
+    Args:
+        symbol: 股票代码
+
+    Returns:
+        该股票的聚合分析结果
+    """
+    try:
+        service = get_guru_watcher()
+        aggregated = service.get_aggregated_sentiment(symbol)
+
+        return aggregated
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/guru/guru/{guru_name}")
+async def get_signals_by_guru(guru_name: str):
+    """
+    获取指定大V的所有信号
+
+    Args:
+        guru_name: 大V名字
+
+    Returns:
+        该大V的信号列表
+    """
+    try:
+        service = get_guru_watcher()
+        signals = service.get_signals_by_guru(guru_name)
+
+        result = {
+            "guru_name": guru_name,
+            "total_signals": len(signals),
+            "signals": [
+                {
+                    "id": s.id,
+                    "sentiment": s.sentiment.value,
+                    "action": s.action.value,
+                    "summary": s.summary,
+                    "mentioned_symbols": [ms.symbol for ms in s.mentioned_symbols],
+                    "publish_time": s.publish_time.isoformat() if s.publish_time else None,
+                }
+                for s in signals
+            ]
+        }
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Guru Watcher V2 - Database-Integrated API
+# =============================================================================
+
+from app.services.guru_service import router as guru_router
+
+# 注册 Guru Watcher V2 路由
+app.include_router(guru_router)
 
 # End of file
