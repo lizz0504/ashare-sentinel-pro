@@ -30,6 +30,7 @@ from app.services.market_service_baostock import get_financials_baostock
 from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, get_ic_recommendation_summary
 from app.services.committee_service import CommitteeService
 from app.core.db import get_db_client
+from app.core.config import settings
 
 
 # ============================================
@@ -41,21 +42,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS 中间件 - 明确允许前端源
+# CORS 中间件 - 从配置读取
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",  # 备用端口
-        "http://127.0.0.1:3001",
-        "http://localhost:3002",  # 备用端口
-        "http://127.0.0.1:3002",
-        "http://localhost:3003",  # 备用端口
-        "http://127.0.0.1:3003",
-        "http://localhost:3004",  # 备用端口
-        "http://127.0.0.1:3004"
-    ],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -74,7 +64,13 @@ async def log_requests(request, call_next):
 
     # 写入文件以确保输出
     try:
-        with open('request_log.txt', 'a', encoding='utf-8') as f:
+        # 确保日志目录存在
+        import os
+        log_dir = os.path.dirname(settings.LOG_FILE_PATH)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+
+        with open(settings.LOG_FILE_PATH, 'a', encoding='utf-8') as f:
             f.write(f"[{time.time()}] {request.method} {request.url}\n")
             f.flush()
     except Exception as e:
@@ -99,7 +95,7 @@ async def log_requests(request, call_next):
     print(f"[RESPONSE] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)", flush=True)
 
     try:
-        with open('request_log.txt', 'a', encoding='utf-8') as f:
+        with open(settings.LOG_FILE_PATH, 'a', encoding='utf-8') as f:
             f.write(f"[{time.time()}] {request.method} {request.url} - {response.status_code} ({process_time:.0f}ms)\n")
             f.flush()
     except Exception as e:

@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Loader2, Sparkles } from "lucide-react"
 import { addAnalysisRecord } from "@/lib/utils/analysisHistory"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8004"
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 const DASHBOARD_CACHE_KEY = 'dashboard_analysis_cache'
 const IC_MEETING_SHARE_KEY = 'ic_meeting_shared_data'
 
@@ -151,7 +151,7 @@ export default function DashboardPage() {
 
       if (err instanceof Error) {
         if (err.message.includes('Failed to fetch')) {
-          errorMessage = "无法连接到后端服务，请确保后端正在运行 (http://localhost:8004)"
+          errorMessage = "无法连接到后端服务，请确保后端正在运行 (http://localhost:8000)"
         } else if (err.message.includes('超时')) {
           errorMessage = err.message
         } else {

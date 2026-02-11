@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     # 数据源配置
     DATA_SOURCE_FALLBACK_TO_AKSHARE: bool = True  # Tushare失败时是否降级到AkShare
 
+    # 日志配置
+    LOG_FILE_PATH: str = "logs/request.log"  # 请求日志文件路径
+
 
 # ============================================
 # 数据源优先级常量（统一管理）

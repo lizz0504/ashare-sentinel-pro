@@ -58,7 +58,7 @@ const LOADING_STAGES = [
   { icon: <Scale className="w-5 h-5" />, text: "查理·芒格正在整理决议..." },
 ]
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8004"
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 // ============================================
 // Fetch with Timeout

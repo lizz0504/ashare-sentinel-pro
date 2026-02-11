@@ -15,7 +15,7 @@ import {
   type AnalysisRecord
 } from "@/lib/utils/analysisHistory"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8004"
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 // ============================================
 // 技术分析数据类型
