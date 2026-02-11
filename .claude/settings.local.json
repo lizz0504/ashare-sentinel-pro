@@ -29,7 +29,8 @@
       "Bash(pip install:*)",
       "Bash(docker:*)",
       "Bash(cmd.exe:*)",
-      "Bash(kill:*)"
+      "Bash(kill:*)",
+      "Bash(xargs:*)"
     ]
   }
 }
