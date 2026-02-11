@@ -11,6 +11,15 @@ from typing import Dict, Optional
 
 import pandas as pd
 
+# ============================================
+# Tushare 字段名常量（统一管理）
+# ============================================
+TUSHARE_TURNOVER_RATE_FIELD = 'turnover_rate'
+TUSHARE_PE_TTM_FIELD = 'pe_ttm'
+TUSHARE_PB_FIELD = 'pb'
+TUSHARE_TOTAL_MV_FIELD = 'total_mv'
+TUSHARE_CLOSE_FIELD = 'close'
+
 # 数据源选择：Tushare → Baostock → AkShare
 # 优先级固定：Tushare优先，然后Baostock，最后AkShare（所有类型的备选）
 # 注意：优先级由 app.core.config.DATA_SOURCE_PRIORITY 统一管理
@@ -1657,11 +1666,16 @@ def calculate_financial_metrics(symbol: str) -> Dict:
 
                     if daily_basic_df is not None and not daily_basic_df.empty:
                         latest = daily_basic_df.iloc[-1]
-                        fundamental_data['pe_ratio'] = _safe_float(latest.get('pe_ttm', None))
-                        fundamental_data['pb_ratio'] = _safe_float(latest.get('pb', None))
-                        fundamental_data['market_cap'] = _safe_float(latest.get('total_mv', None))
-                        fundamental_data['current_price'] = _safe_float(latest.get('close', None))
-                        print(f"[OK] Tushare daily_basic: PE={fundamental_data.get('pe_ratio')}, PB={fundamental_data.get('pb_ratio')}")
+                        # 打印实际可用的列名（用于调试）
+                        print(f"[DEBUG] Tushare daily_basic columns: {list(daily_basic_df.columns)}")
+
+                        # 安全获取字段值：先检查列是否存在，再提取值
+                        fundamental_data['pe_ratio'] = _safe_float(latest[TUSHARE_PE_TTM_FIELD]) if TUSHARE_PE_TTM_FIELD in daily_basic_df.columns else None
+                        fundamental_data['pb_ratio'] = _safe_float(latest[TUSHARE_PB_FIELD]) if TUSHARE_PB_FIELD in daily_basic_df.columns else None
+                        fundamental_data['market_cap'] = _safe_float(latest[TUSHARE_TOTAL_MV_FIELD]) if TUSHARE_TOTAL_MV_FIELD in daily_basic_df.columns else None
+                        fundamental_data['current_price'] = _safe_float(latest[TUSHARE_CLOSE_FIELD]) if TUSHARE_CLOSE_FIELD in daily_basic_df.columns else None
+                        fundamental_data['turnover_rate'] = _safe_float(latest[TUSHARE_TURNOVER_RATE_FIELD]) if TUSHARE_TURNOVER_RATE_FIELD in daily_basic_df.columns else None
+                        print(f"[OK] Tushare daily_basic: PE={fundamental_data.get('pe_ratio')}, PB={fundamental_data.get('pb_ratio')}, Turnover={fundamental_data.get('turnover_rate')}")
 
                     # 使用 fina_indicator 获取 ROE, 资产负债率
                     fina_indicator_df = fetcher.get_financial_indicator(
@@ -1813,12 +1827,14 @@ def calculate_financial_metrics(symbol: str) -> Dict:
             "rsi_14": momentum_metrics.get('rsi_14'),
             "beta": momentum_metrics.get('beta'),
             "volatility": momentum_metrics.get('volatility'),
+            # 换手率 (从 Tushare daily_basic 或 AkShare 数据)
+            "turnover_rate": fundamental_data.get('turnover_rate'),
         }
 
         # 生成文本上下文
         context = _format_financial_context(symbol, latest_price, metrics)
 
-        print(f"[OK] Financial metrics calculated for {symbol}")
+        print(f"[OK] Financial metrics calculated for {symbol}, turnover_rate={metrics.get('turnover_rate')}")
 
         return {
             "symbol": symbol.upper(),

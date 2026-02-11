@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { BarChart3, LayoutDashboard, Briefcase, Users, Zap } from "lucide-react"
+import { BarChart3, LayoutDashboard, Briefcase, Users } from "lucide-react"
 
 export default function DashboardLayout({
   children,
@@ -31,12 +31,6 @@ export default function DashboardLayout({
       icon: Users,
       label: "IC Committee",
       sublabel: "IC投委会",
-    },
-    {
-      href: "/dashboard/guru",
-      icon: Zap,
-      label: "Guru Watcher",
-      sublabel: "大V监控",
     },
   ]
 

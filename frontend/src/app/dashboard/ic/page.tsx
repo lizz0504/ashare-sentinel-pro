@@ -29,6 +29,7 @@ interface ICMeetingResult {
   symbol: string
   stock_name: string
   current_price: number
+  turnover_rate?: string
   technical_score: number | null
   fundamental_score: number | null
   verdict_chinese: string
@@ -302,7 +303,8 @@ export default function ICMeetingPage() {
 
 **股票代码**: ${result.symbol}
 **股票名称**: ${result.stock_name}
-**当前价格**: ${result.current_price}
+**当前价格**: ¥${result.current_price.toFixed(2)}
+${result.turnover_rate && result.turnover_rate !== "N/A" ? `**换手率**: ${result.turnover_rate}` : ""}
 **分析时间**: ${date}
 
 ---
@@ -551,7 +553,7 @@ ${result.warren_buffett || '暂无分析'}
             </CardHeader>
             <CardContent className="space-y-4">
               {/* Verdict Badge */}
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-4 flex-wrap">
                 <Badge className={`text-lg px-6 py-2 ${getVerdictBadgeColor(result.verdict_chinese)}`}>
                   {result.verdict_chinese} {result.conviction_stars}
                 </Badge>

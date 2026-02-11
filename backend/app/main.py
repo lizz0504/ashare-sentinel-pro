@@ -1055,12 +1055,18 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             if 'vwap_20' in technical_data and technical_data['vwap_20'] is not None:
                 metrics_data['vwap_20d'] = technical_data['vwap_20']
                 print(f"[DEBUG] Set vwap_20d={technical_data['vwap_20']}")
+            # 换手率数据源优先级：Tushare > AkShare（遵循项目数据源优先级）
+            # 只有当 Tushare 没有返回 turnover_rate 时，才使用 AkShare 的 turnover
             if 'turnover' in technical_data and technical_data['turnover'] is not None:
-                metrics_data['turnover_rate'] = technical_data['turnover']
-                print(f"[DEBUG] Set turnover_rate={technical_data['turnover']}")
+                if not metrics_data.get('turnover_rate'):
+                    metrics_data['turnover_rate'] = technical_data['turnover']
+                    print(f"[DEBUG] Set turnover_rate from AkShare (fallback): {technical_data['turnover']}")
+                else:
+                    print(f"[DEBUG] Using Tushare turnover_rate={metrics_data.get('turnover_rate')}, AkShare ignored")
 
             current_price = technical_data.get('current_price', metrics_data.get('current_price', 100.0))
             print(f"[DEBUG] Final metrics_data keys: {list(metrics_data.keys())}")
+            print(f"[DEBUG] turnover_rate value: {metrics_data.get('turnover_rate')}, type: {type(metrics_data.get('turnover_rate'))}")
         else:
             current_price = metrics_data.get('current_price', 100.0)
 
@@ -1089,7 +1095,7 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "rsi": f"{metrics_data.get('rsi', 0):.1f}" if metrics_data.get('rsi') is not None else "N/A",
             "volume_status": metrics_data.get('volume_status', "N/A") or "N/A",
             "volume_change_pct": f"{metrics_data.get('volume_change_pct', 0):.1f}%" if metrics_data.get('volume_change_pct') is not None else "N/A",
-            "turnover_rate": f"{metrics_data.get('turnover_rate', 0):.2f}%" if metrics_data.get('turnover_rate') is not None else "N/A",
+            "turnover_rate": f"{metrics_data.get('turnover_rate', 0):.2f}%" if metrics_data.get('turnover_rate') is not None and metrics_data.get('turnover_rate') > 0 else "N/A",
             "ma20_status": metrics_data.get('ma20_status', "N/A") or "N/A",
             "bollinger_position": metrics_data.get('bollinger_position', "N/A") or "N/A",
             "bb_width": f"{metrics_data.get('bb_width', 0):.3f}" if metrics_data.get('bb_width') is not None else "N/A",
@@ -1129,6 +1135,7 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "symbol": meeting_result["symbol"],
             "stock_name": meeting_result["stock_name"],
             "current_price": meeting_result["current_price"],
+            "turnover_rate": context.get("turnover_rate", "N/A"),
             "verdict_chinese": meeting_result["verdict_chinese"],
             "conviction_stars": meeting_result["conviction_stars"],
             "cathie_wood": extract_json_content(meeting_result.get("cathie_wood", "")),
