@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # 日志配置
     LOG_FILE_PATH: str = "logs/request.log"  # 请求日志文件路径
 
+    # --------------------------------------------
+    # RSSHub Configuration
+    # --------------------------------------------
+    RSSHUB_URL: str = "http://localhost:1200"  # 本地RSSHub实例地址
+    RSSHUB_USE_PUBLIC: bool = False  # 是否使用公共实例（可能被限流）
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """将 CORS_ORIGINS 字符串转换为列表"""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
 
 # ============================================
 # 数据源优先级常量（统一管理）
@@ -99,17 +110,6 @@ DATA_TYPE_PRIORITY = {
     "technical_analysis": ["Tushare", "Baostock", "AkShare"],
     "realtime_price": ["Tushare", "Baostock", "AkShare"],
 }
-
-    # --------------------------------------------
-    # RSSHub Configuration
-    # --------------------------------------------
-    RSSHUB_URL: str = "http://localhost:1200"  # 本地RSSHub实例地址
-    RSSHUB_USE_PUBLIC: bool = False  # 是否使用公共实例（可能被限流）
-
-    @property
-    def cors_origins_list(self) -> list[str]:
-        """将 CORS_ORIGINS 字符串转换为列表"""
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
 
 
 # 全局配置实例
