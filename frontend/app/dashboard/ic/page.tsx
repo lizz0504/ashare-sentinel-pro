@@ -1,4 +1,4 @@
-"use client"
+'use client'
 
 import React, { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
@@ -10,7 +10,6 @@ import { addAnalysisRecord } from "@/lib/utils/analysisHistory"
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Separator } from "@/components/ui/separator"
-import { buildUrl } from "@/lib/api"
 
 // ============================================
 // Interfaces
@@ -60,7 +59,7 @@ const LOADING_STAGES = [
   { icon: <Scale className="w-5 h-5" />, text: "查理·芒格正在整理决议..." },
 ]
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 // ============================================
 // Fetch with Timeout
@@ -105,30 +104,23 @@ export default function ICMeetingPage() {
   // 检查从 Dashboard 传递过来的数据
   // ============================================
 
-  // ============================================
-  // 从 Dashboard 加载缓存数据（IC meeting 共享）
-  // ============================================
   useEffect(() => {
     try {
       const sharedData = localStorage.getItem('ic_meeting_shared_data')
       if (sharedData) {
-        try {
-          const data = JSON.parse(sharedData)
-          // 检查数据是否在1小时内
-          const oneHour = 60 * 60 * 1000
-          if (Date.now() - data.timestamp < oneHour) {
-            setResult(data)
-            setSymbol(data.symbol)
-            setFromDashboard(true)
-          } else {
-            localStorage.removeItem('ic_meeting_shared_data')
-          }
-        } catch (parseError) {
+        const data = JSON.parse(sharedData)
+        // 检查数据是否在1小时内
+        const oneHour = 60 * 60 * 1000
+        if (Date.now() - data.timestamp < oneHour) {
+          setResult(data)
+          setSymbol(data.symbol)
+          setFromDashboard(true)
+        } else {
           localStorage.removeItem('ic_meeting_shared_data')
         }
       }
-    } catch (storageError) {
-      console.error('Failed to load shared data:', storageError)
+    } catch (err) {
+      console.error('Failed to load shared data:', err)
     }
   }, [])
 
@@ -187,11 +179,11 @@ export default function ICMeetingPage() {
 
     try {
       const requestBody: ICMeetingRequest = {
-        symbol: trimmedSymbol,
+        symbol: trimmedSymbol.toUpperCase(),
       }
 
       console.log('[IC] Starting meeting for symbol:', trimmedSymbol)
-      const response = await fetchWithTimeout(buildUrl('/api/v1/ic/meeting'), {
+      const response = await fetchWithTimeout(`${API_BASE}/api/v1/ic/meeting`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),

@@ -4,13 +4,85 @@ DataFetcher - Tushare Pro 数据获取类
 封装 Tushare Pro 接口，提供 AkShare 兼容的数据格式
 """
 import time
-from datetime import datetime, timedelta
+import requests
+import os
+import sys
 from typing import Optional, Dict
 
 import pandas as pd
-import tushare as ts
 
 from app.core.config import settings
+
+# =============================================================================
+# 彻底禁用 TQDM 进度条（必须在导入 tushare 之前执行）
+# =============================================================================
+
+# 方法1：环境变量
+os.environ['TQDM_DISABLE'] = '1'
+
+# 方法2：创建假的tqdm类（最彻底）
+class _SilentTqdm:
+    """完全静默的tqdm替代类"""
+    def __init__(self, iterable=None, *args, **kwargs):
+        self.iterable = iterable if iterable is not None else []
+        self.disable = True
+        self.n = 0
+        self.total = None
+        self._instances = {}
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def update(self, *args, **kwargs):
+        pass
+
+    def close(self):
+        pass
+
+    def set_description(self, *args, **kwargs):
+        pass
+
+    def write(self, *args, **kwargs):
+        pass
+
+    def refresh(self):
+        pass
+
+    @staticmethod
+    def range(*args, **kwargs):
+        return _SilentTqdm(range(*args))
+
+    @staticmethod
+    def auto(*args, **kwargs):
+        return _SilentTqdm(*args, **kwargs)
+
+# 替换tqdm模块（在导入tushare之前）
+_fake_tqdm_module = type(sys)('tqdm')
+_fake_tqdm_module.tqdm = _SilentTqdm
+_fake_tqdm_module.auto = _SilentTqdm
+_fake_tqdm_module.trange = _SilentTqdm.range
+sys.modules['tqdm'] = _fake_tqdm_module
+sys.modules['tqdm.auto'] = _fake_tqdm_module
+
+# 如果tqdm已存在，直接替换
+try:
+    import tqdm as _real_tqdm
+    _real_tqdm.tqdm = _SilentTqdm
+    _real_tqdm.auto = _SilentTqdm
+    _real_tqdm.trange = _SilentTqdm.range
+except ImportError:
+    pass
+
+print("[INFO] TQDM进度条已彻底禁用")
+
+# 现在导入tushare（此时tqdm已被替换）
+import tushare as ts
 
 
 class DataFetcher:
@@ -37,6 +109,13 @@ class DataFetcher:
         ts.set_token(self.token)
         self.pro = ts.pro_api()
 
+        # 配置连接超时和请求超时
+        self.connect_timeout = getattr(settings, 'API_TIMEOUT_SLOW', 30)
+        self.read_timeout = getattr(settings, 'API_TIMEOUT_SLOW', 30)
+
+        # 配置 Tushare 底层的 requests session
+        self._configure_session()
+
         # 设置私人链接（如果配置了）
         if self.http_url:
             self.pro._DataApi__token = self.token
@@ -51,9 +130,39 @@ class DataFetcher:
         self.cache = {}
         self.cache_ttl = 300  # 5分钟缓存
 
-        # 重试配置
+        # 重试配置（指数退避）
         self.max_retries = 3
-        self.retry_delay = 2
+        self.base_retry_delay = 2
+
+    def _configure_session(self):
+        """配置 Tushare 底层 requests session 的超时和连接池"""
+        try:
+            # 获取 Tushare 底层的 requests session
+            session = self.pro._DataApi__session
+
+            # 配置超时
+            session.timeout = (self.connect_timeout, self.read_timeout)
+
+            # 配置连接池
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=10,
+                pool_maxsize=20,
+                max_retries=0,  # 我们自己控制重试
+                pool_block=False
+            )
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
+
+            # 设置默认请求头
+            session.headers.update({
+                'Connection': 'keep-alive',
+                'Keep-Alive': 'timeout=30, max=100',
+            })
+
+            print(f"[TUSHARE] Session configured: connect_timeout={self.connect_timeout}s, "
+                  f"read_timeout={self.read_timeout}s")
+        except Exception as e:
+            print(f"[WARN] Failed to configure Tushare session: {e}")
 
     def _add_suffix(self, symbol: str) -> str:
         """
@@ -184,7 +293,7 @@ class DataFetcher:
 
     def _retry_request(self, func, *args, **kwargs):
         """
-        带重试机制的请求
+        带重试机制的请求（指数退避策略）
 
         Args:
             func: 要执行的函数
@@ -194,33 +303,65 @@ class DataFetcher:
         Returns:
             函数执行结果
         """
+        import urllib3.exceptions
+        from requests.exceptions import (
+            ConnectionError, ConnectTimeout, ReadTimeout, Timeout
+        )
+
         last_error = None
         last_error_detail = None
+        is_connection_error = False
 
         for attempt in range(self.max_retries):
             try:
                 self._rate_limit()  # 应用频率控制
                 return func(*args, **kwargs)
+            except (ConnectionError, ConnectTimeout, ReadTimeout, Timeout,
+                    urllib3.exceptions.ConnectTimeoutError,
+                    urllib3.exceptions.ReadTimeoutError,
+                    urllib3.exceptions.ConnectionError) as e:
+                last_error = e
+                is_connection_error = True
+                error_detail = str(e)
+                last_error_detail = error_detail
+
+                # 连接类错误使用指数退避
+                if attempt < self.max_retries - 1:
+                    wait_time = self.base_retry_delay * (2 ** attempt)  # 2s, 4s, 8s
+                    print(f"[WARN] Connection error (attempt {attempt + 1}/{self.max_retries}), "
+                          f"retrying in {wait_time}s: {error_detail[:100]}")
+                    time.sleep(wait_time)
+                else:
+                    print(f"[ERROR] Connection failed after {self.max_retries} attempts: "
+                          f"{error_detail[:100]}")
             except Exception as e:
                 last_error = e
-                # 尝试获取更详细的错误信息
                 error_detail = str(e)
                 if hasattr(e, 'args') and e.args:
                     error_detail = str(e.args[0]) if e.args else str(e)
-
                 last_error_detail = error_detail
+
+                # 其他错误也使用指数退避
                 if attempt < self.max_retries - 1:
-                    wait_time = self.retry_delay * (attempt + 1)
+                    wait_time = self.base_retry_delay * (2 ** attempt)
                     print(f"[WARN] Request failed (attempt {attempt + 1}/{self.max_retries}), "
-                          f"retrying in {wait_time}s: {error_detail}")
+                          f"retrying in {wait_time}s: {error_detail[:100]}")
                     time.sleep(wait_time)
                 else:
-                    print(f"[ERROR] Request failed after {self.max_retries} attempts: {error_detail}")
+                    print(f"[ERROR] Request failed after {self.max_retries} attempts: "
+                          f"{error_detail[:100]}")
 
         # 打印完整的错误堆栈
         import traceback
-        print(f"[ERROR] Full traceback:")
+        print("[ERROR] Full error traceback:")
         traceback.print_exc()
+
+        # 如果是连接错误，抛出更具体的异常
+        if is_connection_error:
+            from app.core.exceptions import TushareConnectionError
+            raise TushareConnectionError(
+                f"Tushare API connection failed: {last_error_detail}"
+            ) from last_error
 
         raise last_error
 

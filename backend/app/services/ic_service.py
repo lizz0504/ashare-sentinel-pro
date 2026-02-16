@@ -17,8 +17,8 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Dict, Any, Optional
-from httpx import AsyncClient, TimeoutException
 
 # Import prompts
 from app.core.prompts import (
@@ -26,7 +26,6 @@ from app.core.prompts import (
     PROMPT_NANCY_PELOSI,
     PROMPT_WARREN_BUFFETT,
     PROMPT_CHARLIE_MUNGER,
-    INVESTOR_PERSONAS,
     VERDICT_MAP,
     CONVICTION_LEVELS
 )
@@ -182,12 +181,18 @@ async def call_llm_async(
     non_chinese = len(prompt) - chinese_chars
     estimated_tokens = int(chinese_chars * 2.5 + non_chinese * 0.5)
 
-    logger.info(f"[TOKEN_CHECK] Prompt: {len(prompt)} chars, {chinese_chars} Chinese, estimated {estimated_tokens} tokens")
+    logger.info(
+        f"[TOKEN_CHECK] Prompt: {len(prompt)} chars, {chinese_chars} Chinese, "
+        f"estimated {estimated_tokens} tokens"
+    )
 
     # 强制限制
     MAX_CHARS = 60000
     if len(prompt) > MAX_CHARS:
-        logger.error(f"[TOKEN_LIMIT] Prompt too long: {len(prompt)} chars > {MAX_CHARS}, truncating...")
+        logger.error(
+            f"[TOKEN_LIMIT] Prompt too long: {len(prompt)} chars > "
+            f"{MAX_CHARS}, truncating..."
+        )
         prompt = prompt[:MAX_CHARS] + "\n\n[...由于长度限制已截断...]"
 
     # 重新计算
@@ -196,7 +201,10 @@ async def call_llm_async(
     estimated_tokens = int(chinese_chars * 2.5 + non_chinese * 0.5)
 
     if estimated_tokens > SAFE_TOKEN_LIMIT:
-        logger.error(f"[TOKEN_LIMIT] Estimated {estimated_tokens} > {SAFE_TOKEN_LIMIT}, truncating...")
+        logger.error(
+            f"[TOKEN_LIMIT] Estimated {estimated_tokens} > {SAFE_TOKEN_LIMIT}, "
+            f"truncating..."
+        )
         target_chars = int(SAFE_TOKEN_LIMIT / 2.5)
         prompt = prompt[:target_chars] + "\n\n[...由于长度限制已截断...]"
         logger.warning(f"[TOKEN_LIMIT] Truncated to {len(prompt)} chars")
@@ -289,7 +297,10 @@ def extract_agent_score(response: str) -> Dict[str, Any]:
             if "reasoning" in parsed:
                 result["reasoning"] = parsed["reasoning"][:200]
 
-            logger.info(f"Extracted score from JSON: {result['score']}, reasoning: {result['reasoning'][:50] if result['reasoning'] else 'N/A'}...")
+            logger.info(
+                f"Extracted score from JSON: {result['score']}, "
+                f"reasoning: {result['reasoning'][:50] if result['reasoning'] else 'N/A'}..."
+            )
 
         # 方法2: 如果JSON解析失败，使用正则表达式提取
         if result["score"] == 50:  # 说明JSON解析没成功
@@ -310,7 +321,9 @@ def extract_agent_score(response: str) -> Dict[str, Any]:
             if lines:
                 # 取第一句非JSON行
                 for line in lines:
-                    if not line.startswith('{') and not line.startswith('[') and not line.startswith('```'):
+                    if (not line.startswith('{') and
+                            not line.startswith('[') and
+                            not line.startswith('```')):
                         # 去掉特殊标记
                         clean_line = re.sub(r'```json|```', '', line)
                         result["reasoning"] = clean_line[:200]
@@ -433,9 +446,25 @@ async def conduct_meeting(
     """
     logger.info(f"Starting IC meeting for {symbol} ({stock_name})")
 
-    # Prepare context
+    # ========================================================================
+    # [TIMING] 开始计时
+    # ========================================================================
+    timing_total_start = time.time()
+    timing_prepare_start = time.time()
     if context is None:
         context = {}
+        # 如果context为空，主动获取财务数据
+        from app.services.market_service import calculate_financial_metrics
+        financial_metrics = calculate_financial_metrics(symbol)
+        # 修复: metrics 数据在 'metrics' 字段中，不是直接在根级别
+        context.update(financial_metrics.get('metrics', {}))
+        # 同时添加 market 和 symbol
+        context['market'] = financial_metrics.get('market', 'A')
+        context['symbol'] = financial_metrics.get('symbol', symbol)
+        logger.info(
+            f"[ENHANCED] Fetched financial metrics: "
+            f"ROE={context.get('roe')}, PE={context.get('pe_ratio')}"
+        )
 
     base_context = f"""
 Stock: {symbol} - {stock_name}
@@ -451,12 +480,12 @@ Debt-to-Equity: {context.get('debt_to_equity', 'N/A')}
 FCF Yield: {context.get('fcf_yield', 'N/A')}
 
 === Growth Metrics (Cathie Wood) ===
-Revenue Growth (CAGR): {context.get('revenue_growth', 'N/A')}
+Revenue Growth (CAGR): {context.get('revenue_growth_cagr', 'N/A')}
 PEG Ratio: {context.get('peg_ratio', 'N/A')}
-R&D Intensity: {context.get('rd_expense', 'N/A')}
+R&D Intensity: {context.get('rd_intensity', 'N/A')}
 
 === Technical & Momentum Metrics (Nancy Pelosi) ===
-RSI (14): {context.get('rsi', 'N/A')}
+RSI (14): {context.get('rsi_14', 'N/A')}
 Volume Status: {context.get('volume_status', 'N/A')}
 Volume Change %: {context.get('volume_change_pct', 'N/A')}%
 Turnover Rate: {context.get('turnover_rate', 'N/A')}%
@@ -474,7 +503,9 @@ Bollinger Position: {context.get('bollinger_position', 'N/A')}
 === Data Quality Notes ===
 {context.get('data_quality_notes')}
 
-IMPORTANT: When data shows as estimated/calculated, please acknowledge this in your analysis and use it with appropriate caution. Make reasonable judgments based on available data rather than simply stating "data unavailable".
+IMPORTANT: When data shows as estimated/calculated, please acknowledge this in your
+analysis and use it with appropriate caution. Make reasonable judgments based on available
+data rather than simply stating "data unavailable".
 """
 
     # 检查并截断 base_context（预留足够空间给 prompt）
@@ -502,8 +533,7 @@ IMPORTANT: When data shows as estimated/calculated, please acknowledge this in y
         from app.services.market_service import get_stock_main_business_tushare
 
         # Add timeout wrapper for Tushare call
-        import signal
-
+        # Note: signal.alarm not supported on Windows, using direct call
         def timeout_handler(signum, frame):
             raise TimeoutError("Tushare API call timed out")
 
@@ -511,21 +541,56 @@ IMPORTANT: When data shows as estimated/calculated, please acknowledge this in y
             # Windows doesn't support signal.alarm, so we'll use a different approach
             # Just call it directly - if it hangs, we'll catch it in the except
             profile_data = get_stock_main_business_tushare(symbol)
-            logger.info(f"[ENHANCED] Tushare profile fetched successfully")
+            logger.info("[ENHANCED] Tushare profile fetched successfully")
+
+            # 获取当前价格（如果传入的 price 无效才使用 stock_info 的值）
+            from app.services.data_fetcher import DataFetcher
+            fetcher = DataFetcher()
+            stock_info = fetcher.get_stock_info(symbol)
+            fetched_price = stock_info.get("current_price", 0) if stock_info else 0
+            # 只有当传入的 current_price 无效时，才使用 fetched_price
+            if not current_price or current_price <= 0:
+                current_price = fetched_price
+            logger.info(f"[ENHANCED] Got current price: {current_price} (fetched: {fetched_price})")
         except Exception as tushare_error:
             logger.warning(f"[ENHANCED] Tushare fetch failed: {tushare_error}")
             profile_data = None
 
-        # 2. Fetch Tavily Intel (Real-time News Intelligence)
+        # 2. Fetch Tavily Intelligence (Real-time News Intelligence)
         from app.services.search_service import search_financial_news, format_search_context_for_llm
+
         logger.info(f"[ENHANCED] Fetching Tavily news for {symbol}...")
-        news_result = await search_financial_news(symbol, stock_name, max_results=5)
-        tavily_context = format_search_context_for_llm(news_result, stock_name)
+        news_result = await search_financial_news(
+            symbol=symbol,
+            stock_name=stock_name,
+            max_results=10
+        )
+        logger.info(f"[ENHANCED] Tavily search completed: {len(news_result.get('results', []))} results")
+
+        # 解析 Tavily JSON 数据
+        tavily_context_json = format_search_context_for_llm(news_result, stock_name)
+        try:
+            tavily_data = json.loads(tavily_context_json)
+            tavily_structured = tavily_data.get("tavily_data", {})
+            tavily_summary = tavily_data.get("summary", "")
+
+            # 提取 Tavily 数据字段
+            tavily_results = tavily_structured.get("results", [])
+            tavily_total = tavily_structured.get("total_fetched", 0)
+            tavily_time = tavily_structured.get("search_time", "")
+            tavily_quality = tavily_structured.get("quality_threshold", 0.4)
+
+            logger.info(
+                f"[ENHANCED] Tavily parsed: {tavily_total} fetched, "
+                f"{len(tavily_results)} results, quality={tavily_quality}"
+            )
+        except Exception as e:
+            logger.warning(f"[ENHANCED] Failed to parse Tavily JSON: {e}, using raw text")
+            tavily_summary = tavily_context_json
 
         # 3. Build Injection Payload (Appended to User Prompt, NOT System Prompt)
         if profile_data or news_result.get('results'):
-            injection_context = f"""
-
+            injection_context = """
 【=== 新增高维数据输入 (Anti-Hallucination) ===】
 """
             if profile_data:
@@ -542,7 +607,7 @@ IMPORTANT: When data shows as estimated/calculated, please acknowledge this in y
             if news_result.get('results'):
                 injection_context += f"""
 2. 市场实时情报 (Tavily Search):
-{tavily_context}
+{tavily_summary}
 """
 
             injection_context += """
@@ -557,11 +622,15 @@ IMPORTANT: When data shows as estimated/calculated, please acknowledge this in y
     # Merge injection context into base context
     enhanced_base_context = base_context + injection_context
 
+    logger.info(f"[TIMING] 数据准备完成: {time.time() - timing_prepare_start:.2f}s")
+
     # =============================================================================
     # Round 1: Parallel Execution (Cathie + Nancy)
     # =============================================================================
 
     logger.info("Round 1: Parallel execution - Cathie Wood + Nancy Pelosi")
+
+    timing_round1_start = time.time()
 
     try:
         # Create tasks for parallel execution
@@ -582,6 +651,7 @@ IMPORTANT: When data shows as estimated/calculated, please acknowledge this in y
         )
 
         logger.info("Round 1 completed: Received responses from Cathie and Nancy")
+        logger.info(f"[TIMING] Round 1 (Cathie+Nancy并行): {time.time() - timing_round1_start:.2f}s")
 
     except Exception as e:
         logger.error(f"Round 1 failed: {str(e)}")
@@ -594,15 +664,24 @@ IMPORTANT: When data shows as estimated/calculated, please acknowledge this in y
 
     logger.info("Round 2: Sequential execution - Warren Buffett")
 
+    timing_round2_start = time.time()
+
     # 更激进地截断前两轮响应，减少 token 使用
     cathie_summary = truncate_with_summary(cathie_response, 200)
     nancy_summary = truncate_with_summary(nancy_response, 200)
 
     # 计算 Warren 的 prompt 预估 token 数
-    warren_prompt_est = estimate_tokens(PROMPT_WARREN_BUFFETT) + estimate_tokens(base_context) + 2000  # 预留 2000 for summaries
+    # 预留 2000 for summaries
+    warren_prompt_est = (
+        estimate_tokens(PROMPT_WARREN_BUFFETT) +
+        estimate_tokens(base_context) + 2000
+    )
 
     if warren_prompt_est > MAX_PROMPT_TOKENS:
-        logger.warning(f"Warren's prompt too large: {warren_prompt_est} tokens, further truncating...")
+        logger.warning(
+            f"Warren's prompt too large: {warren_prompt_est} tokens, "
+            f"further truncating..."
+        )
         cathie_summary = truncate_with_summary(cathie_response, 100)
         nancy_summary = truncate_with_summary(nancy_response, 100)
 
@@ -628,6 +707,7 @@ Review the summarized perspectives above, then provide your value investing anal
             api_key or ""
         )
         logger.info("Round 2 completed: Received response from Warren Buffett")
+        logger.info(f"[TIMING] Round 2 (Warren): {time.time() - timing_round2_start:.2f}s")
 
     except Exception as e:
         logger.error(f"Round 2 failed: {str(e)}")
@@ -639,10 +719,15 @@ Review the summarized perspectives above, then provide your value investing anal
 
     logger.info("Round 3: Final verdict - Charlie Munger")
 
+    timing_round3_start = time.time()
+
     # 计算可用 token 预算
     prompt_tokens = estimate_tokens(PROMPT_CHARLIE_MUNGER)
     context_tokens = estimate_tokens(base_context)
-    available_for_summaries = MAX_PROMPT_TOKENS - prompt_tokens - context_tokens - 5000  # 留出 5000 安全余量
+    # 留出 5000 安全余量
+    available_for_summaries = (
+        MAX_PROMPT_TOKENS - prompt_tokens - context_tokens - 5000
+    )
 
     if available_for_summaries < 1000:
         logger.error(f"Not enough token budget for Charlie: {available_for_summaries}")
@@ -676,7 +761,8 @@ Review the summarized perspectives above, then provide your value investing anal
 {warren_brief}
 
 ## Your Task
-Review the summarized perspectives above, then provide your FINAL VERDICT in JSON format as specified in your instructions.
+Review the summarized perspectives above, then provide your FINAL VERDICT in JSON format
+as specified in your instructions.
 
 **CRITICAL OUTPUT REQUIREMENTS:**
 - Do NOT output markdown formatting (no ```json or ``` blocks)
@@ -691,14 +777,17 @@ Review the summarized perspectives above, then provide your FINAL VERDICT in JSO
     final_token_count = estimate_tokens(final_charlie_prompt)
 
     if final_token_count > SAFE_TOKEN_LIMIT:
-        logger.error(f"Charlie's prompt exceeds safe limit: {final_token_count} > {SAFE_TOKEN_LIMIT}")
+        logger.error(
+            f"Charlie's prompt exceeds safe limit: "
+            f"{final_token_count} > {SAFE_TOKEN_LIMIT}"
+        )
         # 紧急截断：保留核心上下文 + 精简的增强数据
         charlie_context = f"""
 Stock: {symbol} - {stock_name}
 Current Price: {current_price}
 
 ## Key Metrics:
-PE: {context.get('pe_ratio', 'N/A')}, ROE: {context.get('roe', 'N/A')}, Growth: {context.get('revenue_growth', 'N/A')}
+PE: {context.get('pe_ratio', 'N/A')}, ROE: {context.get('roe', 'N/A')}, Growth: {context.get('revenue_growth_cagr', 'N/A')}  # noqa: E501
 
 ## Analysts' Key Decisions:
 - Cathie Wood: {truncate_with_summary(cathie_response, 50)}
@@ -716,6 +805,7 @@ Provide your FINAL VERDICT in JSON format. Be concise.
             api_key or ""
         )
         logger.info("Round 3 completed: Received response from Charlie Munger")
+        logger.info(f"[TIMING] Round 3 (Charlie): {time.time() - timing_round3_start:.2f}s")
 
         # Parse Charlie's JSON response
         final_verdict = clean_and_parse_json(charlie_response)
@@ -743,8 +833,12 @@ Provide your FINAL VERDICT in JSON format. Be concise.
 
     # Normalize to old format for backward compatibility
     normalized_verdict = {
-        "final_verdict": final_verdict.get(verdict_key, final_verdict.get("final_verdict", "HOLD")),
-        "conviction_level": final_verdict.get(conviction_key, final_verdict.get("conviction_level", 3)),
+        "final_verdict": final_verdict.get(
+            verdict_key, final_verdict.get("final_verdict", "HOLD")
+        ),
+        "conviction_level": final_verdict.get(
+            conviction_key, final_verdict.get("conviction_level", 3)
+        ),
         "key_considerations": final_verdict.get("key_considerations", []),
         "invert_risks": final_verdict.get(risks_key, final_verdict.get("invert_risks", [])),
         "synthesis": final_verdict.get("synthesis", ""),
@@ -781,11 +875,17 @@ Provide your FINAL VERDICT in JSON format. Be concise.
     trend_y = int((cathie_score_data["score"] * 0.5) + (technical_score * 0.5))
     trend_y = max(0, min(100, trend_y))  # 确保在0-100范围内
 
-    logger.info(f"[CALCULATOR] Cathie Score: {cathie_score_data['score']}, Nancy Score: {nancy_score_data['score']}, Warren Score: {warren_score_data['score']}")
-    logger.info(f"[CALCULATOR] final_x (Fundamental): {fundamental_x}, final_y (Trend): {trend_y}")
+    logger.info(
+        f"[CALCULATOR] Cathie Score: {cathie_score_data['score']}, "
+        f"Nancy Score: {nancy_score_data['score']}, "
+        f"Warren Score: {warren_score_data['score']}"
+    )
+    logger.info(
+        f"[CALCULATOR] final_x (Fundamental): {fundamental_x}, "
+        f"final_y (Trend): {trend_y}"
+    )
 
     # FLUSH immediately
-    import sys
     for handler in logger.handlers:
         handler.flush()
 
@@ -818,6 +918,7 @@ Provide your FINAL VERDICT in JSON format. Be concise.
 
     logger.info(f"IC meeting completed for {symbol}: {verdict_chinese} {conviction_stars}")
     logger.info(f"[DEBUG] About to return result with {len(result)} keys")
+    logger.info(f"[TIMING] === IC投委会总耗时: {time.time() - timing_total_start:.2f}s ===")
     return result
 
 
@@ -836,39 +937,39 @@ def format_ic_meeting_summary(meeting_result: Dict[str, Any]) -> str:
         Formatted text summary
     """
     lines = [
-        f"# AI投委会会议纪要",
-        f"",
+        "# AI投委会会议纪要",
+        "",
         f"**股票代码**: {meeting_result['symbol']}",
         f"**股票名称**: {meeting_result['stock_name']}",
         f"**当前价格**: {meeting_result['current_price']}",
         f"**最终判决**: {meeting_result['verdict_chinese']} {meeting_result['conviction_stars']}",
-        f"",
-        f"---",
-        f"",
-        f"## 1. Cathie Wood (成长与颠覆)",
-        f"",
+        "",
+        "---",
+        "",
+        "## 1. Cathie Wood (成长与颠覆)",
+        "",
         f"{meeting_result['cathie_wood']}",
-        f"",
-        f"---",
-        f"",
-        f"## 2. Nancy Pelosi (权力与政策)",
-        f"",
+        "",
+        "---",
+        "",
+        "## 2. Nancy Pelosi (权力与政策)",
+        "",
         f"{meeting_result['nancy_pelosi']}",
-        f"",
-        f"---",
-        f"",
-        f"## 3. Warren Buffett (深度价值)",
-        f"",
+        "",
+        "---",
+        "",
+        "## 3. Warren Buffett (深度价值)",
+        "",
         f"{meeting_result['warren_buffett']}",
-        f"",
-        f"---",
-        f"",
-        f"## 4. Charlie Munger (最终判决)",
-        f"",
+        "",
+        "---",
+        "",
+        "## 4. Charlie Munger (最终判决)",
+        "",
         f"**最终观点**: {meeting_result['verdict_chinese']}",
         f"**信心等级**: {meeting_result['conviction_stars']} ({meeting_result['conviction_level']}/5)",
-        f"",
-        f"**关键考虑因素**:",
+        "",
+        "**关键考虑因素**:",
     ]
 
     for consideration in meeting_result['final_verdict'].get('key_considerations', []):
@@ -1030,7 +1131,7 @@ def calculate_fundamental_score(context: Dict[str, Any]) -> int:
                 score -= 20
 
         # Revenue Growth (CAGR) - 权重 25%
-        growth = _to_float(context.get('revenue_growth'))
+        growth = _to_float(context.get('revenue_growth_cagr'))
         if growth is not None:
             growth_pct = growth * 100 if growth < 1 else growth
             if growth_pct >= 20:

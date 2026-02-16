@@ -27,12 +27,16 @@ _SECTOR_INDUSTRY_MAPPING = {
     "医疗健康": {"化学制药": "医疗健康", "生物制药": "医疗健康", "医疗器械": "医疗健康", "中药": "医疗健康"},
     "公用事业": {"电力": "公用事业", "水务": "公用事业", "燃气": "公用事业"},
 
-    # 美股分类
-    "科技": {"Technology": "科技", "Software": "科技", "Semiconductor": "科技", "Internet": "科技",
-             "Social Media": "科技", "Streaming": "科技", "Automotive": "科技"},
-    "金融": {"Banking": "金融", "Payment": "金融", "Insurance": "金融"},
-    "消费品": {"E-Commerce": "消费品", "Retail": "消费品", "Entertainment": "消费品"},
-    "医疗健康": {"Pharma": "医疗健康", "Biotech": "医疗健康", "Healthcare": "医疗健康"},
+    # 美股分类（使用不同键名避免重复）
+    "科技美股": {
+        "Technology": "科技", "Software": "科技", "Semiconductor": "科技",
+        "Internet": "科技", "Social Media": "科技", "Streaming": "科技",
+        "Automotive": "科技"
+    },
+
+    "金融美股": {"Banking": "金融", "Payment": "金融", "Insurance": "金融"},
+    "消费品美股": {"E-Commerce": "消费品", "Retail": "消费品", "Entertainment": "消费品"},
+    "医疗健康美股": {"Pharma": "医疗健康", "Biotech": "医疗健康", "Healthcare": "医疗健康"},
 }
 
 
@@ -44,7 +48,8 @@ def _get_local_classification(sector_en: str, industry_en: str) -> dict:
     # 直接匹配行业
     for sector_cn, industries in _SECTOR_INDUSTRY_MAPPING.items():
         for industry_en_key, industry_cn in industries.items():
-            if industry_en_key.lower() in industry_en_lower or industry_en_key.lower() in sector_en_lower:
+            if (industry_en_key.lower() in industry_en_lower or
+                    industry_en_key.lower() in sector_en_lower):
                 return {"sector_cn": sector_cn, "industry_cn": industry_cn}
 
     # 模糊匹配板块
@@ -78,7 +83,8 @@ def generate_summary(report_id: str) -> str | None:
         full_text = "\n\n".join([chunk["content"] for chunk in chunks_result.data])
         text_to_analyze = full_text[:6000]
 
-        print(f"[OK] Analyzing {len(text_to_analyze)} characters from {len(chunks_result.data)} chunks")
+        print(f"[OK] Analyzing {len(text_to_analyze)} characters from "
+              f"{len(chunks_result.data)} chunks")
 
         # 调用通义千问 API
         api_key = settings.DASHSCOPE_API_KEY
@@ -89,7 +95,9 @@ def generate_summary(report_id: str) -> str | None:
         messages = [
             {
                 "role": "system",
-                "content": "你是一位资深的金融分析师，擅长分析研报并提取核心观点。请用简洁的语言总结报告的主要内容，包括：1) 核心观点 2) 关键数据 3) 投资建议。输出控制在200字以内。"
+                "content": ("你是一位资深的金融分析师，擅长分析研报并提取核心观点。"
+                            "请用简洁的语言总结报告的主要内容，包括：1) 核心观点 "
+                            "2) 关键数据 3) 投资建议。输出控制在200字以内。")
             },
             {
                 "role": "user",
@@ -162,7 +170,7 @@ def create_embedding(text: str) -> List[float] | None:
             print(f"[OK] Generated embedding for {len(text)} characters, dim: {len(embedding)}")
             return embedding
 
-        print(f"[ERROR] Failed to extract embedding from response")
+        print("[ERROR] Failed to extract embedding from response")
         return None
 
     except Exception as e:
@@ -194,7 +202,8 @@ def generate_chat_response(
             return None
 
         # 向量搜索获取相关上下文
-        print(f"[DEBUG] Calling match_documents with threshold={match_threshold}, count={match_count}")
+        print(f"[DEBUG] Calling match_documents with threshold={match_threshold}, "
+              f"count={match_count}")
         match_result = db.rpc(
             "match_documents",
             params={
@@ -223,7 +232,8 @@ def generate_chat_response(
         messages = [
             {
                 "role": "system",
-                "content": "你是一位资深的金融分析师助手。请基于提供的研报内容回答用户的问题。如果提供的上下文中没有相关信息，请明确告知。回答要准确、专业、简洁。"
+                "content": ("你是一位资深的金融分析师助手。请基于提供的研报内容回答用户的问题。"
+                            "如果提供的上下文中没有相关信息，请明确告知。回答要准确、专业、简洁。")
             },
             {
                 "role": "user",
@@ -259,7 +269,8 @@ def classify_stock(symbol: str, name: str, sector_en: str, industry_en: str) -> 
     Returns:
         {"sector_cn": "板块名稱", "industry_cn": "行业名稱"}
     """
-    print(f"[DEBUG] classify_stock called: symbol={symbol}, sector_en={sector_en}, industry_en={industry_en}")
+    print(f"[DEBUG] classify_stock called: symbol={symbol}, "
+          f"sector_en={sector_en}, industry_en={industry_en}")
 
     api_key = settings.DASHSCOPE_API_KEY
 
@@ -267,7 +278,8 @@ def classify_stock(symbol: str, name: str, sector_en: str, industry_en: str) -> 
     local_result = _get_local_classification(sector_en, industry_en)
     print(f"[DEBUG] Local classification result: {local_result}")
     if local_result["sector_cn"] != "其他":
-        print(f"[OK] Local classification for {symbol}: {local_result['sector_cn']} / {local_result['industry_cn']}")
+        print(f"[OK] Local classification for {symbol}: {local_result['sector_cn']} / "
+              f"{local_result['industry_cn']}")
         return local_result
 
     # 2. 本地映射失败，尝试 AI 分类
@@ -279,23 +291,22 @@ def classify_stock(symbol: str, name: str, sector_en: str, industry_en: str) -> 
         messages = [
             {
                 "role": "system",
-                "content": """你是一位資深的金融分析師，擅長將股票分類到中文的板块和行业。
-請根據公司的英文名稱、sector 和 industry，將其分類到最合適的中文板块和行业。
-
-常見的中文板块包括：半導體、新能源、醫療健康、消費品、金融、科技、工業、房地產、公用事業、能源、通信、材料、其他
-
-請以 JSON 格式返回：{"sector_cn": "板块名稱", "industry_cn": "行业名稱"}"""
+                "content": ("你是一位資深的金融分析師，擅長將股票分類到中文的板块和行业。"
+                            "請根據公司的英文名稱、sector 和 industry，"
+                            "將其分類到最合適的中文板块和行业。"
+                            "\n\n常見的中文板块包括：半導體、新能源、醫療健康、消費品、金融、"
+                            "科技、工業、房地產、公用事業、能源、通信、材料、其他"
+                            "\n\n請以 JSON 格式返回：{\"sector_cn\": \"板块名稱\", "
+                            "\"industry_cn\": \"行业名稱\"}")
             },
             {
                 "role": "user",
-                "content": f"""請將以下股票分類到中文的板块和行业：
-
-股票代碼：{symbol}
-公司名稱：{name}
-英文 Sector：{sector_en}
-英文 Industry：{industry_en}
-
-請返回 JSON 格式：{{"sector_cn": "...", "industry_cn": "..."}}"""
+                "content": (f"請將以下股票分類到中文的板块和行业：\n\n"
+                            f"股票代碼：{symbol}\n"
+                            f"公司名稱：{name}\n"
+                            f"英文 Sector：{sector_en}\n"
+                            f"英文 Industry：{industry_en}\n\n"
+                            "請返回 JSON 格式：{\"sector_cn\": \"...\", \"industry_cn\": \"...\"}")
             }
         ]
 
@@ -307,12 +318,13 @@ def classify_stock(symbol: str, name: str, sector_en: str, industry_en: str) -> 
         )
 
         if response.status_code != 200:
-            print(f"[WARN] Qwen API Error: {response.code} - {response.message}, using local fallback")
+            print(f"[WARN] Qwen API Error: {response.code} - "
+                  f"{response.message}, using local fallback")
             return local_result
 
         # 解析 JSON 響應
         if response.output is None or response.output.text is None:
-            print(f"[WARN] Qwen API returned None output, using local fallback")
+            print("[WARN] Qwen API returned None output, using local fallback")
             return local_result
 
         result_text = response.output.text.strip()
@@ -410,7 +422,6 @@ def generate_portfolio_review(
     else:
         action_signal = "STRONG_SELL"
 
-
     # 生成AI分析（如果API可用）
     ai_analysis = None
     if not api_key:
@@ -421,21 +432,31 @@ def generate_portfolio_review(
         vol_status = technical_data.get("volume_status", "持平") if technical_data else "持平"
 
         templates = {
-            "STRONG_BUY": f"{name}週度{direction}{'强势' if price_change_pct > 0 else ''}，{ma_status}且{vol_status}，技術面健康。建議積極配置。",
+            "STRONG_BUY": (
+                f"{name}週度{direction}{'强势' if price_change_pct > 0 else ''}，"
+                f"{ma_status}且{vol_status}，技術面健康。建議積極配置。"
+            ),
             "BUY": f"{name}週度{direction}，{ma_status}，整體走勢良好。可適度加倉。",
             "HOLD": f"{name}週度小幅震盪，{vol_status}，觀望為主。",
             "SELL": f"{name}週度{direction}，{ma_status}，量能不濟。建議減倉。",
-            "STRONG_SELL": f"{name}週度{'大幅' if abs(price_change_pct) > 5 else ''}{direction}，技術面轉弱。建議止損。"
+            "STRONG_SELL": (
+                f"{name}週度{'大幅' if abs(price_change_pct) > 5 else ''}{direction}，"
+                "技術面轉弱。建議止損。"
+            )
         }
 
-        ai_analysis = templates.get(action_signal, f"{name}({symbol}) 過去 {period_days} 天{direction} {abs(price_change_pct):.2f}%。")
+        ai_analysis = templates.get(
+            action_signal,
+            f"{name}({symbol}) 過去 {period_days} 天{direction} {abs(price_change_pct):.2f}%。"
+        )
 
     else:
         try:
             # 构建技术面上下文
             tech_context = ""
             if technical_data:
-                tech_context = f"""
+                tech_context = (
+                    f"""
 技术指标：
 - MA20状态：{technical_data.get('ma20_status', 'N/A')}
 - MA5状态：{technical_data.get('ma5_status', 'N/A')}
@@ -445,49 +466,44 @@ def generate_portfolio_review(
 - K线形态：{technical_data.get('k_line_pattern', 'N/A')}
 - 形态信号：{technical_data.get('pattern_signal', 'N/A')}
 """
+                )
 
             messages = [
                 {
                     "role": "system",
-                    "content": """你是一个严格的量化基金经理。请重点分析K线形态的含义。
-
-K线形态解读指南：
-- 金针探底：下影线长，底部支撑强劲，可能反转向上
-- 冲高回落：上影线长，顶部压力明显，注意回调风险
-- 变盘十字星：实体极小，方向不明，密切关注后续走势
-- 光头大阳线：强势上涨，多方力量充足
-- 光脚大阴线：强势下跌，空方力量主导
-- 普通震荡：无明显形态，常规波动
-
-请根据以下信息，输出纯 JSON 格式：
-1. 股票基本信息（代码、名称、板块、价格变化）
-2. K线形态分析（重点解读当前形态的含义）
-3. 给出 0-100 的健康分
-4. 给出交易信号（STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL）
-5. 用一句话总结分析（不超过50字，必须包含K线形态解读）
-
-输出格式（纯 JSON）：
-{
-  "health_score": 85,
-  "action_signal": "BUY",
-  "analysis": "出现金针探底，底部支撑强劲，建议关注反弹机会。"
-}
-"""
+                    "content": ("你是一个严格的量化基金经理。请重点分析K线形态的含义。\n\n"
+                                "K线形态解读指南：\n"
+                                "- 金针探底：下影线长，底部支撑强劲，可能反转向上\n"
+                                "- 冲高回落：上影线长，顶部压力明显，注意回调风险\n"
+                                "- 变盘十字星：实体极小，方向不明，密切关注后续走势\n"
+                                "- 光头大阳线：强势上涨，多方力量充足\n"
+                                "- 光脚大阴线：强势下跌，空方力量主导\n"
+                                "- 普通震荡：无明显形态，常规波动\n\n"
+                                "请根据以下信息，输出纯 JSON 格式：\n"
+                                "1. 股票基本信息（代码、名称、板块、价格变化）\n"
+                                "2. K线形态分析（重点解读当前形态的含义）\n"
+                                "3. 给出 0-100 的健康分\n"
+                                "4. 给出交易信号（STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL）\n"
+                                "5. 用一句话总结分析（不超过50字，必须包含K线形态解读）\n\n"
+                                "输出格式（纯 JSON）："
+                                "\n{\n"
+                                '  "health_score": 85,\n'
+                                '  "action_signal": "BUY",\n'
+                                '  "analysis": "出现金针探底，底部支撑强劲，建议关注反弹机会。"\n'
+                                "}")
                 },
                 {
                     "role": "user",
-                    "content": f"""请分析以下股票：
-
-股票代码：{symbol}
-公司名称：{name}
-所属板块：{sector}
-期初价格：{start_price:.2f}
-期末价格：{end_price:.2f}
-涨跌幅：{price_change_pct:.2f}%（{direction}）
-统计周期：{period_days} 天
-{tech_context}
-
-请返回纯 JSON 格式。"""
+                    "content": (f"请分析以下股票：\n\n"
+                                f"股票代码：{symbol}\n"
+                                f"公司名称：{name}\n"
+                                f"所属板块：{sector}\n"
+                                f"期初价格：{start_price:.2f}\n"
+                                f"期末价格：{end_price:.2f}\n"
+                                f"涨跌幅：{price_change_pct:.2f}%（{direction}）\n"
+                                f"统计周期：{period_days} 天\n"
+                                f"{tech_context}\n\n"
+                                "请返回纯 JSON 格式。")
                 }
             ]
 
@@ -498,7 +514,8 @@ K线形态解读指南：
             )
 
             if response.status_code != 200:
-                print(f"[WARN] Qwen API Error: {response.code} - {response.message}, using fallback")
+                print(f"[WARN] Qwen API Error: {response.code} - "
+                      f"{response.message}, using fallback")
                 ai_analysis = None
             else:
                 result_text = response.output.text.strip()
@@ -523,10 +540,11 @@ K线形态解读指南：
                             action_signal = ai_result["action_signal"]
 
                     ai_analysis = ai_result.get("analysis", "")
-                    print(f"[OK] AI Analysis for {symbol}: {action_signal}, Score={health_score}")
+                    print(f"[OK] AI Analysis for {symbol}: {action_signal}, "
+                          f"Score={health_score}")
 
                 except json_module.JSONDecodeError:
-                    print(f"[WARN] Failed to parse AI response, using template")
+                    print("[WARN] Failed to parse AI response, using template")
                     ai_analysis = None
 
         except Exception as e:
@@ -551,14 +569,27 @@ K线形态解读指南：
         pattern_desc = pattern_meanings.get(k_pattern, "常规波动")
 
         templates = {
-            "STRONG_BUY": f"{name}週度{direction}{'强势' if price_change_pct > 0 else ''}，出现{k_pattern}（{pattern_desc}），{ma_status}且{vol_status}。强烈买入。",
-            "BUY": f"{name}週度{direction}，{k_pattern}（{pattern_desc}），{ma_status}，整體走勢良好。适量买入。",
+            "STRONG_BUY": (
+                f"{name}週度{direction}{'强势' if price_change_pct > 0 else ''}，"
+                f"出现{k_pattern}（{pattern_desc}），{ma_status}且{vol_status}。强烈买入。"
+            ),
+            "BUY": (
+                f"{name}週度{direction}，{k_pattern}（{pattern_desc}），"
+                f"{ma_status}，整體走勢良好。适量买入。"
+            ),
             "HOLD": f"{name}週度震盪整理，{k_pattern}（{pattern_desc}），{vol_status}。建議持有觀望。",
             "SELL": f"{name}週度{direction}，{k_pattern}（{pattern_desc}），{ma_status}，量能偏弱。建議減倉。",
-            "STRONG_SELL": f"{name}週度{'大幅' if abs(price_change_pct) > 5 else ''}{direction}，{k_pattern}（{pattern_desc}），技術面轉弱。建議止損賣出。"
+            "STRONG_SELL": (
+                f"{name}週度{'大幅' if abs(price_change_pct) > 5 else ''}{direction}，"
+                f"{k_pattern}（{pattern_desc}），技術面轉弱。建議止損賣出。"
+            )
         }
 
-        ai_analysis = templates.get(action_signal, f"{name}({symbol}) 過去 {period_days} 天{direction} {abs(price_change_pct):.2f}%，{k_pattern}。")
+        ai_analysis = templates.get(
+            action_signal,
+            f"{name}({symbol}) 過去 {period_days} 天{direction} "
+            f"{abs(price_change_pct):.2f}%，{k_pattern}。"
+        )
 
     return {
         "health_score": health_score,

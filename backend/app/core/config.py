@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     DATA_SOURCE_FALLBACK_TO_AKSHARE: bool = True  # Tushare失败时是否降级到AkShare
 
     # 日志配置
+    LOG_LEVEL: str = "INFO"  # 日志级别: DEBUG, INFO, WARNING, ERROR
     LOG_FILE_PATH: str = "logs/request.log"  # 请求日志文件路径
 
     # --------------------------------------------

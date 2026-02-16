@@ -1,6 +1,7 @@
-"use client"
+'use client'
 
 import React, { useState, useEffect } from "react"
+import { createBrowserClient } from "@supabase/ssr"
 import { DecisionMatrix } from "@/components/dashboard/DecisionMatrix"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -12,26 +13,21 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 const DASHBOARD_CACHE_KEY = 'dashboard_analysis_cache'
 const IC_MEETING_SHARE_KEY = 'ic_meeting_shared_data'
 
-// 带超时控制的 fetch 函数
-async function fetchWithTimeout(url: string, options: RequestInit = {}, timeout = 60000) {  // 增加到 180 秒（3 分钟）
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeout = 120000) {
   const controller = new AbortController()
   const id = setTimeout(() => controller.abort(), timeout)
 
   try {
-    console.log('[FETCH] Starting request to:', url)
-    console.log('[FETCH] Options:', options)
     const response = await fetch(url, {
       ...options,
       signal: controller.signal
     })
     clearTimeout(id)
-    console.log('[FETCH] Response received:', response.status)
     return response
   } catch (error) {
     clearTimeout(id)
-    console.error('[FETCH] Request failed:', error)
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('AI 分析需要 1-2 分钟，请稍后重试')
+      throw new Error('请求超时，AI 分析需要 40-60 秒，请稍后重试')
     }
     throw error
   }
@@ -45,31 +41,33 @@ interface ICMMeetingResult {
   fundamental_score: number
   verdict_chinese: string
   conviction_stars: string
-  // NEW: AI投委会角色评分和Dashboard坐标
   agent_scores?: {
     cathie_wood?: { score: number; reasoning: string; verdict: string }
     nancy_pelosi?: { score: number; reasoning: string; verdict: string }
     warren_buffett?: { score: number; reasoning: string; verdict: string }
   }
   dashboard_position?: {
-    final_x: number  // 基本面坐标 (Warren×0.6 + Nancy×0.4)
-    final_y: number  // 趋势坐标 (Cathie×0.5 + Tech×0.5)
+    final_x: number
+    final_y: number
   }
 }
 
 export default function DashboardPage() {
-  const [symbol, setSymbol] = useState("")  // 移除硬编码，让用户主动输入
+  const [supabase] = useState(() => createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  ))
+
+  const [symbol, setSymbol] = useState("002050")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ICMMeetingResult | null>(null)
 
-  // 从 localStorage 加载缓存数据
   useEffect(() => {
     try {
       const cached = localStorage.getItem(DASHBOARD_CACHE_KEY)
       if (cached) {
         const data = JSON.parse(cached)
-        // 检查缓存是否在1小时内
         const oneHour = 60 * 60 * 1000
         if (Date.now() - data.timestamp < oneHour) {
           setResult(data.result)
@@ -82,28 +80,6 @@ export default function DashboardPage() {
       console.error('Failed to load cache:', err)
     }
   }, [])
-
-  // 保存结果到 localStorage（同时保存 Dashboard 缓存和 IC 投委会共享数据）
-  useEffect(() => {
-    if (result) {
-      try {
-        const cacheData = {
-          result,
-          symbol,
-          timestamp: Date.now()
-        }
-        // 保存 Dashboard 缓存
-        localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(cacheData))
-        // 同时保存完整的 IC meeting 数据供 IC 投委会页面使用
-        localStorage.setItem(IC_MEETING_SHARE_KEY, JSON.stringify({
-          ...result,
-          timestamp: Date.now()
-        }))
-      } catch (err) {
-        console.error('Failed to save cache:', err)
-      }
-    }
-  }, [result, symbol])
 
   const handleAnalyze = async () => {
     if (!symbol.trim()) {
@@ -134,7 +110,19 @@ export default function DashboardPage() {
       const data = await response.json()
       setResult(data)
 
-      // 自动保存到复盘历史记录
+      // 保存到dashboard缓存
+      localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({
+        result: data,
+        symbol: symbol.trim(),
+        timestamp: Date.now()
+      }))
+
+      // 保存到IC投委会共享数据，让IC页面能够读取
+      localStorage.setItem(IC_MEETING_SHARE_KEY, JSON.stringify({
+        ...data,
+        timestamp: Date.now()
+      }))
+
       addAnalysisRecord({
         type: 'dashboard',
         symbol: data.symbol,
@@ -151,7 +139,7 @@ export default function DashboardPage() {
 
       if (err instanceof Error) {
         if (err.message.includes('Failed to fetch')) {
-          errorMessage = "无法连接到后端服务，请确保后端正在运行 (http://localhost:8000)"
+          errorMessage = "无法连接到后端服务，请确保后端正在运行"
         } else if (err.message.includes('超时')) {
           errorMessage = err.message
         } else {
@@ -174,18 +162,16 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div>
-        <h1 className="text-3xl font-bold text-slate-100">Dashboard</h1>
-        <p className="mt-2 text-slate-400">投资决策分析仪表盘</p>
+        <h1 className="text-3xl font-bold text-slate-100 mb-2">股票分析</h1>
+        <p className="text-slate-400">输入 A 股代码，获取 AI 投委会的深度分析</p>
       </div>
 
-      {/* Input Card */}
-      <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
+      <Card className="bg-slate-900/60 backdrop-blur-xl border border-slate-700/50">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-slate-100 text-lg">
+          <CardTitle className="flex items-center gap-2 text-slate-100">
             <Sparkles className="w-5 h-5 text-blue-400" />
-            股票分析
+            <span>快速分析</span>
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -201,7 +187,7 @@ export default function DashboardPage() {
             <Button
               onClick={handleAnalyze}
               disabled={!symbol.trim() || isLoading}
-              className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white font-medium"
+              className="bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-700 hover:to-emerald-700 text-white font-medium"
             >
               {isLoading ? (
                 <React.Fragment>
@@ -231,25 +217,27 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* Loading State */}
       {isLoading && (
-        <Card className="bg-slate-900/50 border-slate-800">
+        <Card className="bg-slate-900/60 backdrop-blur-xl border border-slate-700/50">
           <CardContent className="p-8">
             <div className="flex flex-col items-center gap-4">
               <Loader2 className="w-12 h-12 animate-spin text-blue-400" />
               <p className="text-slate-300">AI 投委会正在分析中，请稍候...</p>
               <p className="text-sm text-slate-500">预计等待时间 40-60 秒</p>
-              <p className="text-xs text-slate-600 mt-2">4 位 AI 专家正在独立分析</p>
+              <div className="flex items-center gap-2 text-sm text-slate-600">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
+                <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" style={{animationDelay: '0.6s'}}></div>
+              </div>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Results */}
       {result && !isLoading && (
         <div className="space-y-6">
-          {/* Stock Info Card */}
-          <Card className="bg-slate-900/50 border-slate-800">
+          <Card className="bg-slate-900/60 backdrop-blur-xl border border-slate-700/50">
             <CardContent className="p-6">
               <div className="flex items-center justify-between">
                 <div>
@@ -262,7 +250,7 @@ export default function DashboardPage() {
                 </div>
                 <div className="text-right">
                   <div className="text-sm text-slate-400">AI 投委会判决</div>
-                  <div className="text-lg font-semibold text-slate-100">
+                  <div className="text-lg font-semibold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
                     {result.verdict_chinese} {result.conviction_stars}
                   </div>
                 </div>
@@ -270,8 +258,7 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Decision Matrix - 使用新的AI投委会加权坐标 */}
-          <div className="bg-slate-900/30 border border-slate-800 rounded-lg p-6">
+          <div className="bg-slate-900/30 border border-slate-700/50 rounded-2xl p-6">
             <DecisionMatrix
               technical={result.dashboard_position?.final_y ?? result.technical_score}
               fundamental={result.dashboard_position?.final_x ?? result.fundamental_score}
@@ -280,9 +267,8 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Initial State */}
       {!result && !error && !isLoading && (
-        <Card className="bg-slate-900/50 border-slate-800">
+        <Card className="bg-slate-900/60 backdrop-blur-xl border border-slate-700/50">
           <CardContent className="py-16 text-center">
             <Sparkles className="w-16 h-16 mx-auto mb-4 text-slate-600" />
             <p className="text-slate-400">输入股票代码，开始投资分析</p>

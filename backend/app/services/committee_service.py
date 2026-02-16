@@ -15,7 +15,11 @@ from datetime import datetime
 from typing import Dict
 
 from app.core.llm_factory import LLMFactory
-from app.services.market_service import get_market_snapshot, get_stock_technical_analysis, get_news_titles
+from app.services.market_service import (
+    get_market_snapshot,
+    get_stock_technical_analysis,
+    get_news_titles
+)
 
 
 # ============================================
@@ -94,7 +98,8 @@ class CommitteeService:
         """
         运行全脑协同决策会议
 
-        Returns: dict with symbol, timestamp, fundamentals, analysis, conclusion
+        Returns: dict with symbol, timestamp, fundamentals,
+                 analysis, conclusion
         """
         print(f"[全脑协同] 正在调用不同模型的原生特长分析: {symbol}")
 
@@ -105,13 +110,22 @@ class CommitteeService:
 
         # 2. 构建通用上下文
         context = self._build_context(symbol, data)
-        print(f"[市场数据] PE:{data['pe_ttm']} PB:{data['pb']} ROE:{data['roe']}% 健康:{data['health_score']}/100")
+        print(
+            f"[市场数据] PE:{data['pe_ttm']} PB:{data['pb']} "
+            f"ROE:{data['roe']}% 健康:{data['health_score']}/100"
+        )
 
         # 3. 左右脑并行执行
         print("[左右脑并行] 千问看题材，DeepSeek算估值...")
         qwen_res, deepseek_res = await asyncio.gather(
-            self.llm.fast_reply("qwen", QWEN_SENTIMENT_PROMPT, f"分析对象数据：\n{context}"),
-            self.llm.fast_reply("deepseek", DEEPSEEK_LOGIC_PROMPT, f"审计对象数据：\n{context}")
+            self.llm.fast_reply(
+                "qwen", QWEN_SENTIMENT_PROMPT,
+                f"分析对象数据：\n{context}"
+            ),
+            self.llm.fast_reply(
+                "deepseek", DEEPSEEK_LOGIC_PROMPT,
+                f"审计对象数据：\n{context}"
+            )
         )
         print(f"[感性脑-Qwen] {qwen_res[:80]}...")
         print(f"[理性脑-DeepSeek] {deepseek_res[:80]}...")
@@ -124,21 +138,34 @@ class CommitteeService:
 【感性脑 (Qwen)】{qwen_res}
 【理性脑 (DeepSeek)】{deepseek_res}
 """
-        judge_raw = await self.llm.fast_reply("zhipu", ZHIPU_DECISION_PROMPT, zhipu_input)
+        judge_raw = await self.llm.fast_reply(
+            "zhipu", ZHIPU_DECISION_PROMPT, zhipu_input
+        )
         conclusion = self._parse_judge(judge_raw)
 
-        print(f"[最终决策] {conclusion['final_decision']} ({conclusion['reasoning']})")
+        print(
+            f"[最终决策] {conclusion['final_decision']} "
+            f"({conclusion['reasoning']})"
+        )
 
         return {
             "symbol": symbol,
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "fundamentals": {k: data[k] for k in [
-                "pe_ttm", "pb", "total_mv", "turnover", "roe", "volume_ratio",
-                "health_score", "action_signal"
+                "pe_ttm", "pb", "total_mv", "turnover", "roe",
+                "volume_ratio", "health_score", "action_signal"
             ]},
             "analysis": {
-                "narrative_agent": {"model": "Qwen", "role": "感性脑", "content": qwen_res},
-                "logic_agent": {"model": "DeepSeek", "role": "理性脑", "content": deepseek_res}
+                "narrative_agent": {
+                    "model": "Qwen",
+                    "role": "感性脑",
+                    "content": qwen_res
+                },
+                "logic_agent": {
+                    "model": "DeepSeek",
+                    "role": "理性脑",
+                    "content": deepseek_res
+                }
             },
             "conclusion": conclusion
         }
@@ -162,13 +189,23 @@ class CommitteeService:
             "turnover": fund.get('turnover'),
             "roe": fund.get('roe'),
             "volume_ratio": fund.get('volume_ratio'),
-            "health_score": technical.get('health_score') if technical else None,
-            "action_signal": technical.get('action_signal') if technical else None,
+            "health_score": (
+                technical.get('health_score') if technical else None
+            ),
+            "action_signal": (
+                technical.get('action_signal') if technical else None
+            ),
             "ma20_status": technical.get('ma20_status') if technical else None,
-            "volume_status": technical.get('volume_status') if technical else None,
+            "volume_status": (
+                technical.get('volume_status') if technical else None
+            ),
             "rsi_14": technical.get('rsi_14') if technical else None,
-            "bollinger_upper": technical.get('bollinger_upper') if technical else None,
-            "bollinger_lower": technical.get('bollinger_lower') if technical else None,
+            "bollinger_upper": (
+                technical.get('bollinger_upper') if technical else None
+            ),
+            "bollinger_lower": (
+                technical.get('bollinger_lower') if technical else None
+            ),
             "bandwidth": technical.get('bandwidth') if technical else None,
             "vwap_20": technical.get('vwap_20') if technical else None,
             "current_price": snapshot.get('current_price'),
@@ -227,8 +264,12 @@ VWAP: {data['vwap_20'] or 'N/A'}
                     "sentiment_summary": parsed.get('sentiment_summary', ''),
                     "risk_summary": parsed.get('risk_summary', ''),
                     "final_decision": parsed.get('final_decision', 'HOLD'),
-                    "suggested_position": parsed.get('suggested_position', '观望'),
-                    "reasoning": parsed.get('reasoning', default['reasoning'])
+                    "suggested_position": parsed.get(
+                        'suggested_position', '观望'
+                    ),
+                    "reasoning": parsed.get(
+                        'reasoning', default['reasoning']
+                    )
                 }
         except Exception as e:
             print(f"[ERROR] Parse judge error: {e}")
@@ -242,8 +283,16 @@ VWAP: {data['vwap_20'] or 'N/A'}
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "fundamentals": {},
             "analysis": {
-                "narrative_agent": {"model": "Qwen", "role": "感性脑", "content": f"[失败] {msg}"},
-                "logic_agent": {"model": "DeepSeek", "role": "理性脑", "content": f"[失败] {msg}"}
+                "narrative_agent": {
+                    "model": "Qwen",
+                    "role": "感性脑",
+                    "content": f"[失败] {msg}"
+                },
+                "logic_agent": {
+                    "model": "DeepSeek",
+                    "role": "理性脑",
+                    "content": f"[失败] {msg}"
+                }
             },
             "conclusion": {
                 "sentiment_summary": "",
@@ -266,6 +315,9 @@ VWAP: {data['vwap_20'] or 'N/A'}
     def get_stars(decision: str) -> str:
         """获取信心星级"""
         return {
-            "STRONG_BUY": "⭐⭐⭐⭐⭐", "BUY": "⭐⭐⭐⭐",
-            "HOLD": "⭐⭐⭐", "SELL": "⭐⭐", "STRONG_SELL": "⭐"
+            "STRONG_BUY": "⭐⭐⭐⭐⭐",
+            "BUY": "⭐⭐⭐⭐",
+            "HOLD": "⭐⭐⭐",
+            "SELL": "⭐⭐",
+            "STRONG_SELL": "⭐"
         }.get(decision, "⭐⭐⭐")

@@ -5,7 +5,7 @@ Baostock Financial Data Fetcher - Simplified and Tested
 """
 
 import baostock as bs
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional
 
 
@@ -102,13 +102,17 @@ def _infer_sector_from_industry(industry: str) -> str:
     if any(x in industry_lower for x in ['银行', '保险', '证券', '金融', '信托', '租赁']):
         return 'Financials'
     # 科技
-    if any(x in industry_lower for x in ['软件', '半导体', '电子', '计算机', '通信', '互联网', '技术']):
+    tech_keywords = ['软件', '半导体', '电子', '计算机',
+                     '通信', '互联网', '技术']
+    if any(x in industry_lower for x in tech_keywords):
         return 'Technology'
     # 医疗
     if any(x in industry_lower for x in ['医药', '生物', '医疗', '保健']):
         return 'Healthcare'
     # 消费
-    if any(x in industry_lower for x in ['食品', '饮料', '服装', '零售', '消费', '家电', '汽车']):
+    consumer_keywords = ['食品', '饮料', '服装',
+                         '零售', '消费', '家电', '汽车']
+    if any(x in industry_lower for x in consumer_keywords):
         return 'Consumer'
     # 工业
     if any(x in industry_lower for x in ['制造', '机械', '设备', '工程', '建筑', '化工']):
@@ -176,7 +180,8 @@ def get_financials_baostock(symbol: str) -> Optional[Dict]:
                     metrics['roe'] = float(roe_str) * 100  # 转换为百分比
 
         # 2. 获取净利润增长率和营业利润增长率（成长能力）
-        # query_growth_data: ['code', 'pubDate', 'statDate', 'YOYEquity', 'YOYAsset', 'YOYNI', 'YOYNIBasic', 'YOYEPS', ...]
+        # query_growth_data: ['code', 'pubDate', 'statDate', 'YOYEquity',
+        # 'YOYAsset', 'YOYNI', 'YOYNIBasic', 'YOYEPS', ...]
         rs = bs.query_growth_data(code=bs_symbol, year=2024, quarter=3)
         if rs.error_code == '0':
             data_list = []
@@ -192,12 +197,16 @@ def get_financials_baostock(symbol: str) -> Optional[Dict]:
         # 2a. 设置营收增长率（用利润增长率作为合理估算）
         # 如果没有独立的营收增长率数据，用利润增长率 × 0.8 作为保守估计
         # 一般来说，营收增长会带动利润增长，但利润率的变化会影响利润增长率
-        if 'profit_growth_cagr' in metrics and 'revenue_growth_cagr' not in metrics:
+        if ('profit_growth_cagr' in metrics and
+                'revenue_growth_cagr' not in metrics):
             # 利润增长率为22.33%，营收增长率约为利润的80%（保守估计）
-            metrics['revenue_growth_cagr'] = metrics['profit_growth_cagr'] * 0.8
+            metrics['revenue_growth_cagr'] = (
+                metrics['profit_growth_cagr'] * 0.8)
 
         # 3. 获取资产负债率（资产负债表数据）
-        # Columns: ['code', 'pubDate', 'statDate', 'currentRatio', 'quickRatio', 'cashRatio', 'YOYLiability', 'liabilityToAsset', 'assetToEquity']
+        # Columns: ['code', 'pubDate', 'statDate', 'currentRatio',
+        # 'quickRatio', 'cashRatio', 'YOYLiability', 'liabilityToAsset',
+        # 'assetToEquity']
         # assetToEquity at index 8 is used to calculate debt ratio
         # Formula: 资产负债率 = (1 - 1 / assetToEquity) * 100%
         rs = bs.query_balance_data(code=bs_symbol, year=2024, quarter=3)
@@ -217,8 +226,10 @@ def get_financials_baostock(symbol: str) -> Optional[Dict]:
                         metrics['debt_to_equity'] = debt_ratio
 
         # 4. 获取历史价格数据（PE, PB, 当前价格）
+        from datetime import timedelta
         end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(
+            days=30)).strftime('%Y-%m-%d')
 
         rs = bs.query_history_k_data_plus(
             bs_symbol,
@@ -247,7 +258,7 @@ def get_financials_baostock(symbol: str) -> Optional[Dict]:
         # 登出
         bs.logout()
 
-        print(f"[OK] Baostock data fetched successfully")
+        print("[OK] Baostock data fetched successfully")
         print(f"[DEBUG] Metrics: {metrics}")
 
         return {
@@ -268,6 +279,6 @@ if __name__ == "__main__":
     result = get_financials_baostock("600519")
     if result:
         print(f"\nSource: {result['source']}")
-        print(f"Metrics:")
+        print("Metrics:")
         for k, v in result['metrics'].items():
             print(f"  {k}: {v}")

@@ -2,19 +2,117 @@
 Fintech Platform - Backend API
 FastAPI Application Entry Point
 """
+# flake8: noqa: E501
+
+
+# ============================================================================
+# 全局禁用 tqdm 和所有进度条（解决 Tushare SDK 的 58 步骤问题）
+# ============================================================================
+import os
+import sys
+import io
+
+# 设置环境变量
+os.environ['TQDM_DISABLE'] = '1'
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+# 创建一个完全静默的 tqdm 模块
+class _SilentTqdm:
+    """完全静默的 tqdm 替代品"""
+    def __init__(self, iterable=None, *args, **kwargs):
+        self.iterable = iterable
+        self.n = 0
+
+    def __iter__(self):
+        if self.iterable is not None:
+            return iter(self.iterable)
+        return iter([])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def update(self, n=1):
+        self.n += n
+
+    def close(self):
+        pass
+
+    def set_description(self, desc=None):
+        pass
+
+    def refresh(self):
+        pass
+
+    def write(self, s, file=sys.stdout, end='\n'):
+        pass
+
+    @property
+    def format_dict(self):
+        return {}
+
+# 在任何导入之前替换 tqdm
+sys.modules['tqdm'] = type('Module', (), {
+    'tqdm': _SilentTqdm,
+    'trange': lambda *a, **k: _SilentTqdm(),
+    'tqdm_gui': _SilentTqdm,
+    'tqdm_notebook': _SilentTqdm,
+    'autonotebook': lambda *a, **k: None,
+    '__version__': '0.0.0'
+})()
+sys.modules['tqdm.gui'] = type('Module', (), {'tqdm': _SilentTqdm})()
+sys.modules['tqdm.auto'] = type('Module', (), {'tqdm': _SilentTqdm})()
+sys.modules['tqdm.notebook'] = type('Module', (), {'tqdm': _SilentTqdm})()
 
 # 加载 .env 文件 (必须在其他导入之前)
 from dotenv import load_dotenv
 load_dotenv()
 
-import uuid
-import asyncio
-from typing import Literal
+# 标准库导入
+import uuid # noqa: F401
+import asyncio # noqa: F401
+import logging
+from typing import Literal, Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+# 第三方库导入
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# 应用导入
+from app.core.config import settings
+from app.deps import get_current_user, get_current_user_optional
+from app.services.ocr_service import process_pdf
+from app.services.llm_service import generate_chat_response, classify_stock, generate_portfolio_review
+from app.services.market_service import (
+    get_stock_info,
+    get_weekly_performance,
+    validate_symbol,
+    get_market_sentiment,
+    get_stock_technical_analysis,
+    calculate_financial_metrics
+)
+from app.services.market_service_baostock import get_financials_baostock
+from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, get_ic_recommendation_summary
+from app.services.committee_service import CommitteeService
+from app.core.db import get_db_client
+
+# 配置日志根logger
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL, "INFO"),
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler(settings.LOG_FILE_PATH),
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# JWT 鉴权依赖
+from app.deps import get_current_user, get_current_user_optional
 
 from app.services.ocr_service import process_pdf
 from app.services.llm_service import generate_chat_response, classify_stock, generate_portfolio_review
@@ -386,32 +484,28 @@ async def add_stock(request: AddStockRequest):
     )
 
     # 保存到数据库
-    db = get_db_client()
-    try:
-        result = db.table("portfolio").insert({
-            "symbol": stock_info["symbol"],
-            "name": stock_info["name"],
-            "sector": classification["sector_cn"],
-            "industry": classification["industry_cn"],
-            "cost_basis": request.cost_basis,
-            "shares": request.shares,
-            "notes": request.notes,
-        }).execute()
+    from utils.db_helper import safe_insert
+    from utils.constants import MSG_STOCK_ADDED, ERR_FAILED_SAVE_STOCK
 
-        if result.data:
-            item = result.data[0]
-            print(f"[OK] Stock added: {item['symbol']}")
-            return PortfolioItem(**item)
-        else:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=500, detail="Failed to save stock")
+    portfolio_data = {
+        "symbol": stock_info["symbol"],
+        "name": stock_info["name"],
+        "sector": classification["sector_cn"],
+        "industry": classification["industry_cn"],
+        "cost_basis": request.cost_basis,
+        "shares": request.shares,
+        "notes": request.notes,
+    }
 
-    except Exception as e:
-        print(f"[ERROR] Failed to add stock: {e}")
-        import traceback
-        traceback.print_exc()
+    result_data = safe_insert("portfolio", portfolio_data)
+
+    if result_data:
+        item = result_data[0]
+        print(MSG_STOCK_ADDED.format(symbol=item['symbol']))
+        return PortfolioItem(**item)
+    else:
         from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=ERR_FAILED_SAVE_STOCK)
 
 
 @app.get("/api/v1/portfolio", response_model=PortfolioResponse)
@@ -429,13 +523,16 @@ async def get_portfolio():
     db = get_db_client()
     try:
         # 获取所有股票
+        from utils.db_helper import safe_select
         query_start = time.time()
-        result = db.table("portfolio").select("*").order("created_at", desc=True).execute()
+        result_data = safe_select("portfolio", order_by="created_at", desc=True)
+        if result_data is None:
+            result_data = []
         query_time = time.time() - query_start
-        print(f"[INFO] Database query took: {query_time:.3f}s, returned {len(result.data)} rows")
+        print(f"[INFO] Database query took: {query_time:.3f}s, returned {len(result_data)} rows")
 
         items = []
-        for item_data in result.data:
+        for item_data in result_data:
             item = PortfolioItem(**item_data)
 
             # 如果股票缺少名称或行业为"其他"，尝试从AkShare更新
@@ -453,14 +550,16 @@ async def get_portfolio():
                             "sector": stock_info.get("sector_en", item.sector),
                             "industry": stock_info.get("industry_en", item.industry)
                         }
-                        db.table("portfolio").update(update_data).eq("id", item.id).execute()
+                        # 更新数据库
+                        from utils.db_helper import safe_update
+                        update_success = safe_update("portfolio", update_data, {"id": item.id})
+                        if update_success:
+                            # 更新当前对象
+                            item.name = update_data["name"]
+                            item.sector = update_data["sector"]
+                            item.industry = update_data["industry"]
 
-                        # 更新当前对象
-                        item.name = update_data["name"]
-                        item.sector = update_data["sector"]
-                        item.industry = update_data["industry"]
-
-                        print(f"[OK] Updated {item.symbol}: {item.name}")
+                            print(f"[OK] Updated {item.symbol}: {item.name}")
                 except Exception as e:
                     print(f"[WARN] Failed to update {item.symbol}: {e}")
 
@@ -493,23 +592,17 @@ async def delete_stock(portfolio_id: str):
     """
     print(f"[INFO] Deleting stock: {portfolio_id}")
 
-    db = get_db_client()
-    try:
-        result = db.table("portfolio").delete().eq("id", portfolio_id).execute()
+    from utils.db_helper import safe_delete
+    from utils.constants import ERR_FAILED_SAVE_STOCK
 
-        if result.data:
-            print(f"[OK] Stock deleted: {portfolio_id}")
-            return DeleteStockResponse(success=True, message="Stock deleted successfully")
-        else:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Stock not found")
+    delete_success = safe_delete("portfolio", {"id": portfolio_id})
 
-    except Exception as e:
-        print(f"[ERROR] Failed to delete stock: {e}")
-        import traceback
-        traceback.print_exc()
+    if delete_success:
+        print(f"[OK] Stock deleted: {portfolio_id}")
+        return DeleteStockResponse(success=True, message="Stock deleted successfully")
+    else:
         from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail="Stock not found")
 
 
 @app.post("/api/v1/portfolio/review", response_model=WeeklyReviewResponse)
@@ -528,13 +621,14 @@ async def generate_weekly_review(request: GenerateReviewRequest):
     db = get_db_client()
     try:
         # 获取股票
-        portfolio_result = db.table("portfolio").select("*").eq("id", request.portfolio_id).execute()
+        from utils.db_helper import safe_select
+        portfolio_result_data = safe_select("portfolio", {"id": request.portfolio_id}, order_by=None)
 
-        if not portfolio_result.data:
+        if not portfolio_result_data:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Stock not found")
 
-        stock = portfolio_result.data[0]
+        stock = portfolio_result_data[0]
         symbol = stock["symbol"]
         name = stock["name"]
         sector = stock["sector"]
@@ -611,9 +705,12 @@ async def get_stock_reviews(portfolio_id: str):
 
     db = get_db_client()
     try:
-        result = db.table("weekly_reviews").select("*").eq("portfolio_id", portfolio_id).order("review_date", desc=True).execute()
+        from utils.db_helper import safe_select
+        result_data = safe_select("weekly_reviews", {"portfolio_id": portfolio_id}, order_by="review_date", desc=True)
+        if result_data is None:
+            result_data = []
 
-        reviews = [WeeklyReviewResponse(**item) for item in result.data]
+        reviews = [WeeklyReviewResponse(**item) for item in result_data]
         print(f"[OK] Retrieved {len(reviews)} reviews")
 
         return reviews
@@ -661,12 +758,13 @@ def update_portfolio_persistent_data(symbol: str, technical_data: dict) -> bool:
     当技术分析接口请求成功后，将完整的技术分析数据持久化到 Supabase
     """
     try:
-        db = get_db_client()
-        result = db.table("portfolio").select("id").eq("symbol", symbol).execute()
+        from utils.db_helper import safe_select, safe_update
+        from datetime import datetime
 
-        if result.data:
-            portfolio_id = result.data[0]["id"]
-            from datetime import datetime
+        result_data = safe_select("portfolio", {"symbol": symbol}, order_by=None)
+
+        if result_data:
+            portfolio_id = result_data[0]["id"]
 
             # 将 health_score 转换为整数（数据库字段是 integer 类型）
             health_score = technical_data.get("health_score", 0)
@@ -691,11 +789,12 @@ def update_portfolio_persistent_data(symbol: str, technical_data: dict) -> bool:
                 "tech_analysis_date": str(datetime.now().date()),
             }
 
-            db.table("portfolio").update(update_data).eq("id", portfolio_id).execute()
-            action_signal = technical_data.get("action_signal", "N/A")
-            current_price = technical_data.get("current_price", 0)
-            print(f"[DB UPDATE] ✅ Saved to database: {symbol} | 信号: {action_signal} | 价格: ¥{current_price}")
-            return True
+            update_success = safe_update("portfolio", update_data, {"id": portfolio_id})
+            if update_success:
+                action_signal = technical_data.get("action_signal", "N/A")
+                current_price = technical_data.get("current_price", 0)
+                print(f"[DB UPDATE] ✅ Saved to database: {symbol} | 信号: {action_signal} | 价格: ¥{current_price}")
+                return True
     except Exception as e:
         print(f"[DB UPDATE] ❌ Failed to update {symbol}: {e}")
     return False
@@ -837,10 +936,12 @@ async def generate_portfolio_report():
         from fastapi import HTTPException
 
         # 1. 获取投资组合数据
-        db = get_db_client()
-        result = db.table("portfolio").select("*").order("created_at", desc=True).execute()
+        from utils.db_helper import safe_select
+        result_data = safe_select("portfolio", order_by="created_at", desc=True)
+        if result_data is None:
+            result_data = []
 
-        items = [PortfolioItem(**item) for item in result.data]
+        items = [PortfolioItem(**item) for item in result_data]
         # A股代码是6位数字
         a_share_items = [item for item in items if item.symbol and item.symbol.isdigit() and len(item.symbol) == 6]
 
@@ -1006,8 +1107,8 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
         return content.strip()
 
     try:
-        # 1. 获取基本股票信息
-        stock_info = get_stock_info(request.symbol, fetch_price=False)
+        # 1. 获取基本股票信息 (包含当前价格)
+        stock_info = get_stock_info(request.symbol, fetch_price=True)
         stock_name = stock_info.get("name", request.symbol) if stock_info else request.symbol
 
         # 2. 获取财务数据（优先级：Tushare → Baostock → AkShare）
@@ -1064,11 +1165,14 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
                 else:
                     print(f"[DEBUG] Using Tushare turnover_rate={metrics_data.get('turnover_rate')}, AkShare ignored")
 
-            current_price = technical_data.get('current_price', metrics_data.get('current_price', 100.0))
+            # 优先使用 technical_data 的价格，其次使用 stock_info 的价格，最后使用默认值
+            current_price = technical_data.get('current_price') or stock_info.get('current_price') or metrics_data.get('current_price', 100.0)
             print(f"[DEBUG] Final metrics_data keys: {list(metrics_data.keys())}")
             print(f"[DEBUG] turnover_rate value: {metrics_data.get('turnover_rate')}, type: {type(metrics_data.get('turnover_rate'))}")
+            print(f"[DEBUG] current_price source: technical={technical_data.get('current_price')}, stock_info={stock_info.get('current_price')}, final={current_price}")
         else:
-            current_price = metrics_data.get('current_price', 100.0)
+            current_price = stock_info.get('current_price') or metrics_data.get('current_price', 100.0)
+            print(f"[DEBUG] current_price (no technical data): stock_info={stock_info.get('current_price')}, final={current_price}")
 
         # 3. 构建上下文（使用真实财务数据 + 技术分析数据）
         # 构建带估算说明的上下文
@@ -1086,13 +1190,14 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "roe": f"{metrics_data.get('roe', 0):.1f}%" if metrics_data.get('roe') else "N/A",
             "debt_to_equity": f"{metrics_data.get('debt_to_equity', 0):.1f}%" if metrics_data.get('debt_to_equity') else "N/A",
             "fcf_yield": f"{metrics_data.get('fcf_yield', 0):.1f}%" if metrics_data.get('fcf_yield') else "N/A",
+            "dividend_yield": f"{metrics_data.get('dividend_yield', 0):.1f}%" if metrics_data.get('dividend_yield') else "N/A",  # 股息率
 
             # 成长指标 - 显示是否为估算值
-            "revenue_growth": f"{metrics_data.get('revenue_growth_cagr', 0):.1f}%" if metrics_data.get('revenue_growth_cagr') else "N/A",
-            "rd_expense": f"{metrics_data.get('rd_intensity', 0):.1f}" if metrics_data.get('rd_intensity') else "N/A",
+            "revenue_growth_cagr": f"{metrics_data.get('revenue_growth_cagr', 0):.1f}%" if metrics_data.get('revenue_growth_cagr') else "N/A",
+            "rd_intensity": f"{metrics_data.get('rd_intensity', 0):.1f}" if metrics_data.get('rd_intensity') else "N/A",
 
             # 技术指标 - 使用更安全的格式化逻辑
-            "rsi": f"{metrics_data.get('rsi', 0):.1f}" if metrics_data.get('rsi') is not None else "N/A",
+            "rsi_14": f"{metrics_data.get('rsi_14', 0):.1f}" if metrics_data.get('rsi_14') is not None else "N/A",
             "volume_status": metrics_data.get('volume_status', "N/A") or "N/A",
             "volume_change_pct": f"{metrics_data.get('volume_change_pct', 0):.1f}%" if metrics_data.get('volume_change_pct') is not None else "N/A",
             "turnover_rate": f"{metrics_data.get('turnover_rate', 0):.2f}%" if metrics_data.get('turnover_rate') is not None and metrics_data.get('turnover_rate') > 0 else "N/A",
@@ -1109,9 +1214,9 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
         # 添加数据质量说明给AI
         data_quality_notes = []
         if metrics_data.get('revenue_growth_estimated'):
-            data_quality_notes.append(f"营收增长率({context['revenue_growth']})为基于ROE或行业平均值的估算")
+            data_quality_notes.append(f"营收增长率({context['revenue_growth_cagr']})为基于ROE或行业平均值的估算")
         if metrics_data.get('rd_intensity_estimated'):
-            data_quality_notes.append(f"研发费率({context['rd_expense']})为基于行业平均值的估算")
+            data_quality_notes.append(f"研发费率({context['rd_intensity']})为基于行业平均值的估算")
         if metrics_data.get('peg_ratio_calculated'):
             data_quality_notes.append(f"PEG比率({context['peg_ratio']})为基于PE和营收增长率计算得出")
 
@@ -1119,7 +1224,7 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             context['data_quality_notes'] = "; ".join(data_quality_notes)
 
         # 调试：打印context数据
-        print(f"[DEBUG] Context for AI: rsi={context.get('rsi')}, bb_width={context.get('bb_width')}, vwap_20d={context.get('vwap_20d')}, ma20_status={context.get('ma20_status')}")
+        print(f"[DEBUG] Context for AI: rsi_14={context.get('rsi_14')}, bb_width={context.get('bb_width')}, vwap_20d={context.get('vwap_20d')}, ma20_status={context.get('ma20_status')}")
 
         # 4. 执行IC meeting
         meeting_result = await conduct_meeting(
@@ -1176,6 +1281,50 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "technical_score": 50,
             "fundamental_score": 50
         }
+
+
+# ============================================
+# 认证测试接口
+# ============================================
+
+@app.get("/api/me")
+async def get_me(user_id: str = Depends(get_current_user)):
+    """
+    获取当前用户信息（需要认证）
+
+    Headers:
+        Authorization: Bearer <access_token>
+
+    Returns:
+        {
+            "user_id": "<uuid>",
+            "status": "authenticated"
+        }
+    """
+    return {
+        "user_id": user_id,
+        "status": "authenticated"
+    }
+
+
+@app.get("/api/v1/me")
+async def get_me_v1(user_id: str = Depends(get_current_user)):
+    """
+    获取当前用户信息 v1（需要认证）
+
+    Headers:
+        Authorization: Bearer <access_token>
+
+    Returns:
+        {
+            "user_id": "<uuid>",
+            "status": "authenticated"
+        }
+    """
+    return {
+        "user_id": user_id,
+        "status": "authenticated"
+    }
 
 
 # End of file

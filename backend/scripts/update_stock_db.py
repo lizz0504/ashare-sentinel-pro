@@ -9,7 +9,7 @@ import os
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from app.services.stock_db import update_stock_database, export_to_csv, search_stocks
+from app.services.stock_db import update_stock_database, export_to_csv, search_stocks  # noqa: E402
 
 if __name__ == "__main__":
     import argparse

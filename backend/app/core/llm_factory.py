@@ -7,6 +7,7 @@ LLM Factory - 多模型AI调用工厂
 """
 
 import logging
+import time
 from typing import Optional
 from httpx import AsyncClient, TimeoutException as HttpTimeout
 
@@ -42,7 +43,7 @@ class LLMFactory:
         model: str,
         system: str,
         user: str,
-        timeout: int = 30
+        timeout: int = 60  # 增加到 60 秒（原 30 秒）
     ) -> str:
         """快速调用模型"""
         caller = {
@@ -63,15 +64,20 @@ class LLMFactory:
         timeout: int
     ) -> Optional[dict]:
         """通用API调用"""
+        start = time.time()
         try:
             async with AsyncClient(timeout=timeout) as client:
                 r = await client.post(url, headers=headers, json=payload)
                 r.raise_for_status()
+                elapsed = time.time() - start
+                logger.info(f"[TIMING] LLM API调用成功: {url.split('/')[-3]} - {elapsed:.2f}s")
                 return r.json()
         except HttpTimeout:
-            logger.error(f"API timeout: {url}")
+            elapsed = time.time() - start
+            logger.error(f"[TIMING] LLM API超时: {url.split('/')[-3]} - {elapsed:.2f}s (timeout={timeout}s)")
         except Exception as e:
-            logger.error(f"API error: {e}")
+            elapsed = time.time() - start
+            logger.error(f"[TIMING] LLM API错误: {url.split('/')[-3]} - {elapsed:.2f}s - {e}")
         return None
 
     @classmethod
@@ -84,14 +90,15 @@ class LLMFactory:
 
         data = await cls._call_api(
             cls.APIS["deepseek"],
-            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            {"Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"},
             {
                 "model": cls.MODELS["deepseek"],
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user}
                 ],
-                "max_tokens": 1000,
+                "max_tokens": 500,  # 减少到 500（原 1000）加快响应
                 "temperature": 0.7
             },
             timeout
@@ -103,29 +110,41 @@ class LLMFactory:
 
     @classmethod
     async def _call_zhipu(cls, system: str, user: str, timeout: int) -> str:
-        """调用智谱GLM"""
+        """调用智谱GLM - 直接HTTP请求，不使用SDK避免进度条问题"""
         api_key = getattr(settings, 'ZHIPU_API_KEY', None)
         if not api_key:
             logger.warning("智谱未配置，降级到DeepSeek")
             return await cls._call_deepseek(system, user, timeout)
 
-        data = await cls._call_api(
-            cls.APIS["zhipu"],
-            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            {
-                "model": cls.MODELS["zhipu"],
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ],
-                "max_tokens": 1000,
-                "temperature": 0.6
-            },
-            timeout
-        )
+        # 直接使用HTTP请求而非SDK，避免dashscope SDK的进度条和延迟
+        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": cls.MODELS["zhipu"],
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "max_tokens": 1000,  # 减少到 1000（原 8000）加快响应
+            "temperature": 0.6
+        }
 
-        if data and "choices" in data and data["choices"]:
-            return data["choices"][0]["message"]["content"]
+        try:
+            async with AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, headers=headers, json=payload)
+                r.raise_for_status()
+                data = r.json()
+                if "choices" in data and data["choices"]:
+                    return data["choices"][0]["message"]["content"]
+                return "[错误] 智谱调用失败"
+        except HttpTimeout:
+            logger.error(f"智谱API超时: {url}")
+        except Exception as e:
+            logger.error(f"智谱API错误: {e}")
+
         return "[错误] 智谱调用失败"
 
     @classmethod

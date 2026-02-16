@@ -5,14 +5,14 @@
 """
 import json
 import os
-from datetime import datetime
 from typing import Dict, Optional
 
 import akshare as ak
 
 
 # 本地数据库文件路径
-_STOCK_DB_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "stock_database.json")
+_STOCK_DB_FILE = os.path.join(
+    os.path.dirname(__file__), "..", "data", "stock_database.json")
 
 
 def _load_local_db() -> Dict:
@@ -119,8 +119,10 @@ def update_stock_database():
     for code, info in online_data.items():
         if code in local_data:
             # 保留本地已有的分类信息
-            online_data[code]['sector'] = local_data[code].get('sector', '未知')
-            online_data[code]['industry'] = local_data[code].get('industry', '未知')
+            online_data[code]['sector'] = local_data[code].get(
+                'sector', '未知')
+            online_data[code]['industry'] = local_data[code].get(
+                'industry', '未知')
 
     # 保存更新后的数据库
     _save_local_db(online_data)
@@ -167,8 +169,8 @@ def search_stocks(keyword: str, limit: int = 20) -> list:
     results = []
     for code, info in stock_db.items():
         if (keyword in code or
-            keyword in info['name'] or
-            keyword in info.get('pinyin', '')):
+                keyword in info['name'] or
+                keyword in info.get('pinyin', '')):
             results.append({
                 'code': code,
                 'name': info['name'],
@@ -186,7 +188,8 @@ def search_stocks(keyword: str, limit: int = 20) -> list:
 def export_to_csv(output_file: str = None):
     """导出股票数据库到CSV文件"""
     if output_file is None:
-        output_file = os.path.join(os.path.dirname(__file__), "..", "data", "stocks.csv")
+        output_file = os.path.join(
+            os.path.dirname(__file__), "..", "data", "stocks.csv")
 
     stock_db = _load_local_db()
 

@@ -71,7 +71,10 @@ INDUSTRY_GROWTH_RATES = {
 }
 
 
-def calculate_peg_ratio(pe_ratio: Optional[float], revenue_growth: Optional[float]) -> Optional[float]:
+def calculate_peg_ratio(
+    pe_ratio: Optional[float],
+    revenue_growth: Optional[float]
+) -> Optional[float]:
     """
     计算PEG比率
 
@@ -94,7 +97,10 @@ def calculate_peg_ratio(pe_ratio: Optional[float], revenue_growth: Optional[floa
         return None
 
 
-def estimate_revenue_growth(metrics_data: Dict[str, Any], industry: Optional[str] = None) -> Optional[float]:
+def estimate_revenue_growth(
+    metrics_data: Dict[str, Any],
+    industry: Optional[str] = None
+) -> Optional[float]:
     """
     估算营收增长率
 
@@ -127,15 +133,21 @@ def estimate_revenue_growth(metrics_data: Dict[str, Any], industry: Optional[str
     if industry:
         for industry_key, growth_rate in INDUSTRY_GROWTH_RATES.items():
             if industry_key in industry:
-                logger.info(f"[ESTIMATE] Using industry default growth rate for {industry}: {growth_rate}%")
+                logger.info(
+                    f"[ESTIMATE] Using industry default growth rate for "
+                    f"{industry}: {growth_rate}%"
+                )
                 return growth_rate
 
     # 4. 最后使用保守估计10%
-    logger.warning(f"[ESTIMATE] Using conservative growth rate 10% for unknown industry")
+    logger.warning("[ESTIMATE] Using conservative growth rate 10% for unknown industry")
     return 10.0
 
 
-def estimate_rd_intensity(metrics_data: Dict[str, Any], industry: Optional[str] = None) -> Optional[float]:
+def estimate_rd_intensity(
+    metrics_data: Dict[str, Any],
+    industry: Optional[str] = None
+) -> Optional[float]:
     """
     估算研发费率
 
@@ -158,11 +170,14 @@ def estimate_rd_intensity(metrics_data: Dict[str, Any], industry: Optional[str] 
     if industry:
         for industry_key, rd_rate in INDUSTRY_RD_RATES.items():
             if industry_key in industry:
-                logger.info(f"[ESTIMATE] Using industry default R&D rate for {industry}: {rd_rate}%")
+                logger.info(
+                    f"[ESTIMATE] Using industry default R&D rate for "
+                    f"{industry}: {rd_rate}%"
+                )
                 return rd_rate
 
     # 3. 使用保守估计3%（制造业平均水平）
-    logger.warning(f"[ESTIMATE] Using conservative R&D rate 3% for unknown industry")
+    logger.warning("[ESTIMATE] Using conservative R&D rate 3% for unknown industry")
     return 3.0
 
 
