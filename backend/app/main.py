@@ -16,6 +16,11 @@ import io
 os.environ['TQDM_DISABLE'] = '1'
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
+# 强制设置标准输出为 UTF-8 (解决 Windows GBK 编码问题)
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # 创建一个完全静默的 tqdm 模块
 class _SilentTqdm:
     """完全静默的 tqdm 替代品"""
@@ -100,13 +105,25 @@ from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, 
 from app.services.committee_service import CommitteeService
 from app.core.db import get_db_client
 
+# V1.6 版本化管理导入
+from app.models.versioning import (
+    StockCreate, ReportCreate, SuggestionEnum,
+    ICMeetingRequestV2, ICMeetingResponseV2
+)
+from app.repositories.versioning_repository import (
+    StockRepository, ReportRepository
+)
+from app.core.db_mysql import get_mysql_connection, test_mysql_connection
+
 # 配置日志根logger
+# 确保日志文件使用 UTF-8 编码
+_file_handler = logging.FileHandler(settings.LOG_FILE_PATH, encoding='utf-8')
+_file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL, "INFO"),
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler(settings.LOG_FILE_PATH),
-    ]
+    handlers=[_file_handler]
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +145,16 @@ from app.services.market_service_baostock import get_financials_baostock
 from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, get_ic_recommendation_summary
 from app.services.committee_service import CommitteeService
 from app.core.db import get_db_client
+
+# V1.6 版本化管理导入
+from app.models.versioning import (
+    StockCreate, ReportCreate, SuggestionEnum,
+    ICMeetingRequestV2, ICMeetingResponseV2
+)
+from app.repositories.versioning_repository import (
+    StockRepository, ReportRepository
+)
+from app.core.db_mysql import get_mysql_connection, test_mysql_connection
 from app.core.config import settings
 
 
@@ -314,6 +341,7 @@ class ICMeetingRequest(BaseModel):
     beta: str | None = None
     rsi_14: str | None = None
     fcf_yield: str | None = None
+    save_to_db: bool = False  # 是否保存到数据库（自动归档）
 
 
 class ICMeetingResponse(BaseModel):
@@ -1084,6 +1112,327 @@ async def generate_portfolio_report():
 @app.post("/api/v1/ic/meeting")
 async def conduct_ic_meeting(request: ICMeetingRequest):
     """
+    召开AI投委会会议 - 完整实现（带自动归档）
+
+    新增功能：
+    - save_to_db: 分析完成后自动保存到数据库，实现版本化管理
+    """
+    import sys
+    import os
+    import re
+
+    def extract_json_content(text: str) -> str:
+        """提取分析内容，移除 JSON 代码块和标题标记"""
+        if not text:
+            return text
+        # 查找 ```json ... ``` 代码块
+        json_match = re.search(r'```json\s*\n?\s*\{.*?\}\s*\n?```', text, re.DOTALL)
+        if json_match:
+            # 提取 JSON 后面的内容
+            content = text[json_match.end():]
+            # 移除【第二步：详细分析】等标题标记
+            content = re.sub(r'【.*?】.*?\n', '', content)
+            return content.strip()
+        # 如果没有找到代码块，尝试移除标题标记
+        content = re.sub(r'【.*?】.*?\n', '', text)
+        return content.strip()
+
+    # 数据库连接（用于归档）
+    db_conn = None
+    report_id = None
+    version_id = None
+    saved_to_db = False
+
+    try:
+        # 1. 获取基本股票信息 (包含当前价格)
+        stock_info = get_stock_info(request.symbol, fetch_price=True)
+        stock_name = stock_info.get("name", request.symbol) if stock_info else request.symbol
+        industry = stock_info.get("industry_en", "未知行业") if stock_info else "未知行业"
+
+        # 2. 获取财务数据（优先级：Tushare → Baostock → AkShare）
+        from app.services.market_service import calculate_financial_metrics, get_stock_technical_analysis
+
+        # 尝试获取完整财务指标
+        financial_result = calculate_financial_metrics(request.symbol)
+        metrics_data = financial_result.get('metrics', {}) if financial_result else {}
+
+        # 导入数据增强服务
+        from app.services.data_enhancement_service import enhance_financial_metrics
+
+        # 增强财务数据（智能填充缺失字段）
+        metrics_data = enhance_financial_metrics(metrics_data, industry)
+
+        # 总是获取技术分析数据（包含 RSI、换手率、MA20 等独立指标）
+        technical_data = get_stock_technical_analysis(request.symbol)
+        print(f"[DEBUG] Technical data received: {list(technical_data.keys()) if technical_data else 'None'}")
+        if technical_data:
+            # 先合并所有原始数据
+            for key, value in technical_data.items():
+                metrics_data[key] = value
+
+            # 计算布林带位置
+            if technical_data.get('bollinger_lower') and technical_data.get('bollinger_upper'):
+                bb_range = technical_data['bollinger_upper'] - technical_data['bollinger_lower']
+                if bb_range > 0:
+                    bb_position = (technical_data['current_price'] - technical_data['bollinger_lower']) / bb_range
+                    metrics_data['bollinger_position'] = f"{bb_position:.1%}"
+                else:
+                    metrics_data['bollinger_position'] = "N/A"
+            else:
+                metrics_data['bollinger_position'] = "N/A"
+
+            # 标准化字段名称（必须在合并后立即执行）
+            if 'rsi_14' in technical_data and technical_data['rsi_14'] is not None:
+                metrics_data['rsi'] = technical_data['rsi_14']
+                print(f"[DEBUG] Set rsi={technical_data['rsi_14']}")
+            if 'bandwidth' in technical_data and technical_data['bandwidth'] is not None:
+                metrics_data['bb_width'] = technical_data['bandwidth']
+                print(f"[DEBUG] Set bb_width={technical_data['bandwidth']}")
+            if 'vwap_20' in technical_data and technical_data['vwap_20'] is not None:
+                metrics_data['vwap_20d'] = technical_data['vwap_20']
+                print(f"[DEBUG] Set vwap_20d={technical_data['vwap_20']}")
+            # 换手率数据源优先级：Tushare > AkShare（遵循项目数据源优先级）
+            # 只有当 Tushare 没有返回 turnover_rate 时，才使用 AkShare 的 turnover
+            if 'turnover' in technical_data and technical_data['turnover'] is not None:
+                if not metrics_data.get('turnover_rate'):
+                    metrics_data['turnover_rate'] = technical_data['turnover']
+                    print(f"[DEBUG] Set turnover_rate from AkShare (fallback): {technical_data['turnover']}")
+                else:
+                    print(f"[DEBUG] Using Tushare turnover_rate={metrics_data.get('turnover_rate')}, AkShare ignored")
+
+            # 优先使用 technical_data 的价格，其次使用 stock_info 的价格，最后使用默认值
+            current_price = technical_data.get('current_price') or stock_info.get('current_price') or metrics_data.get('current_price', 100.0)
+            print(f"[DEBUG] Final metrics_data keys: {list(metrics_data.keys())}")
+            print(f"[DEBUG] turnover_rate value: {metrics_data.get('turnover_rate')}, type: {type(metrics_data.get('turnover_rate'))}")
+            print(f"[DEBUG] current_price source: technical={technical_data.get('current_price')}, stock_info={stock_info.get('current_price')}, final={current_price}")
+        else:
+            current_price = stock_info.get('current_price') or metrics_data.get('current_price', 100.0)
+            print(f"[DEBUG] current_price (no technical data): stock_info={stock_info.get('current_price')}, final={current_price}")
+
+        # 3. 构建上下文（使用真实财务数据 + 技术分析数据）
+        # 构建带估算说明的上下文
+        context = {
+            # 基本信息和估值指标
+            "industry": industry,
+            "market_cap": f"{metrics_data.get('market_cap', 0) / 100000000:.1f}亿" if metrics_data.get('market_cap') else "N/A",
+            "pe_ratio": f"{metrics_data.get('pe_ratio', 0):.1f}" if metrics_data.get('pe_ratio') else "N/A",
+            "pb_ratio": f"{metrics_data.get('pb_ratio', 0):.1f}" if metrics_data.get('pb_ratio') else "N/A",
+
+            # PEG比率 - 显示是否为计算值
+            "peg_ratio": f"{metrics_data.get('peg_ratio', 0):.1f}" if metrics_data.get('peg_ratio') else "N/A",
+
+            # 盈利能力和财务健康
+            "roe": f"{metrics_data.get('roe', 0):.1f}%" if metrics_data.get('roe') else "N/A",
+            "debt_to_equity": f"{metrics_data.get('debt_to_equity', 0):.1f}%" if metrics_data.get('debt_to_equity') else "N/A",
+            "fcf_yield": f"{metrics_data.get('fcf_yield', 0):.1f}%" if metrics_data.get('fcf_yield') else "N/A",
+            "dividend_yield": f"{metrics_data.get('dividend_yield', 0):.1f}%" if metrics_data.get('dividend_yield') else "N/A",  # 股息率
+
+            # 成长指标 - 显示是否为估算值
+            "revenue_growth_cagr": f"{metrics_data.get('revenue_growth_cagr', 0):.1f}%" if metrics_data.get('revenue_growth_cagr') else "N/A",
+            "rd_intensity": f"{metrics_data.get('rd_intensity', 0):.1f}" if metrics_data.get('rd_intensity') else "N/A",
+
+            # 技术指标 - 使用更安全的格式化逻辑
+            "rsi_14": f"{metrics_data.get('rsi_14', 0):.1f}" if metrics_data.get('rsi_14') is not None else "N/A",
+            "volume_status": metrics_data.get('volume_status', "N/A") or "N/A",
+            "volume_change_pct": f"{metrics_data.get('volume_change_pct', 0):.1f}%" if metrics_data.get('volume_change_pct') is not None else "N/A",
+            "turnover_rate": f"{metrics_data.get('turnover_rate', 0):.2f}%" if metrics_data.get('turnover_rate') is not None and metrics_data.get('turnover_rate') > 0 else "N/A",
+            "ma20_status": metrics_data.get('ma20_status', "N/A") or "N/A",
+            "bollinger_position": metrics_data.get('bollinger_position', "N/A") or "N/A",
+            "bb_width": f"{metrics_data.get('bb_width', 0):.3f}" if metrics_data.get('bb_width') is not None else "N/A",
+            "vwap_20d": f"{metrics_data.get('vwap_20d', 0):.2f}" if metrics_data.get('vwap_20d') is not None else "N/A",
+
+            # 综合评分
+            "health_score": metrics_data.get('health_score', 50),
+            "action_signal": metrics_data.get('action_signal', "HOLD") or "HOLD"
+        }
+
+        # 添加数据质量说明给AI
+        data_quality_notes = []
+        if metrics_data.get('revenue_growth_estimated'):
+            data_quality_notes.append(f"营收增长率({context['revenue_growth_cagr']})为基于ROE或行业平均值的估算")
+        if metrics_data.get('rd_intensity_estimated'):
+            data_quality_notes.append(f"研发费率({context['rd_intensity']})为基于行业平均值的估算")
+        if metrics_data.get('peg_ratio_calculated'):
+            data_quality_notes.append(f"PEG比率({context['peg_ratio']})为基于PE和营收增长率计算得出")
+
+        if data_quality_notes:
+            context['data_quality_notes'] = "; ".join(data_quality_notes)
+
+        # 调试：打印context数据
+        print(f"[DEBUG] Context for AI: rsi_14={context.get('rsi_14')}, bb_width={context.get('bb_width')}, vwap_20d={context.get('vwap_20d')}, ma20_status={context.get('ma20_status')}")
+
+        # 4. 执行IC meeting
+        meeting_result = await conduct_meeting(
+            symbol=request.symbol,
+            stock_name=stock_name,
+            current_price=current_price,
+            context=context,
+            api_key=""
+        )
+
+        # 5. 自动归档逻辑 (V1.6 新增)
+        if request.save_to_db:
+            try:
+                # 测试数据库连接
+                if not test_mysql_connection():
+                    print("[WARN] MySQL connection failed, skipping database save")
+                else:
+                    db_conn = get_mysql_connection_direct()
+
+                    # 5.1 创建或更新股票记录
+                    stock_repo = StockRepository(db_conn)
+                    stock_create = StockCreate(
+                        code=request.symbol,
+                        name=stock_name,
+                        current_price=current_price,
+                        change_percent=metrics_data.get('change_percent'),
+                        turnover_rate=metrics_data.get('turnover_rate')
+                    )
+                    await stock_repo.create(stock_create)
+
+                    # 5.2 解析专家评分
+                    agent_scores = meeting_result.get('agent_scores', {})
+                    score_growth = agent_scores.get('cathie_wood', {}).get('score')
+                    score_value = agent_scores.get('warren_buffett', {}).get('score')
+                    score_technical = meeting_result.get('technical_score')
+
+                    # 解析评级
+                    verdict_chinese = meeting_result.get('verdict_chinese', '')
+                    conviction_stars = meeting_result.get('conviction_stars', '')
+
+                    # 映射中文评级到英文
+                    verdict_map = {
+                        '买入': SuggestionEnum.BUY,
+                        '持有': SuggestionEnum.HOLD,
+                        '卖出': SuggestionEnum.SELL
+                    }
+                    verdict = verdict_map.get(verdict_chinese, SuggestionEnum.HOLD)
+
+                    # 5.3 创建报告记录
+                    report_repo = ReportRepository(db_conn)
+
+                    # 构建 Markdown 内容
+                    content_md = f"""# {stock_name} ({request.symbol}) - IC投委会分析报告
+
+## 基本信息
+- 当前价格: {current_price}
+- 行业: {industry}
+- PE: {context.get('pe_ratio')}
+- PB: {context.get('pb_ratio')}
+- ROE: {context.get('roe')}
+
+## Cathie Wood (成长投资)
+{extract_json_content(meeting_result.get('cathie_wood', ''))}
+
+## Nancy Pelosi (技术面)
+{extract_json_content(meeting_result.get('nancy_pelosi', ''))}
+
+## Warren Buffett (价值投资)
+{extract_json_content(meeting_result.get('warren_buffett', ''))}
+
+## 最终裁决
+- 评级: {verdict_chinese}
+- 信心程度: {conviction_stars}
+"""
+
+                    report_create = ReportCreate(
+                        stock_code=request.symbol,
+                        content=content_md,
+                        cathie_wood_analysis=meeting_result.get('cathie_wood', ''),
+                        nancy_pelosi_analysis=meeting_result.get('nancy_pelosi', ''),
+                        warren_buffett_analysis=meeting_result.get('warren_buffett', ''),
+                        charlie_munger_analysis=str(meeting_result.get('final_verdict', {})),
+                        score_growth=score_growth,
+                        score_value=score_value,
+                        score_technical=score_technical,
+                        verdict=verdict,
+                        conviction_level=len(conviction_stars) if conviction_stars else None,
+                        conviction_stars=conviction_stars,
+                        financial_data=metrics_data
+                    )
+
+                    saved_report = await report_repo.create(report_create)
+                    report_id = saved_report.id
+                    version_id = saved_report.version_id
+                    saved_to_db = True
+
+                    # 5.4 更新股票表的最新状态
+                    await stock_repo.update_latest_scores(
+                        code=request.symbol,
+                        score_growth=score_growth,
+                        score_value=score_value,
+                        score_technical=score_technical,
+                        suggestion=verdict,
+                        conviction=conviction_stars
+                    )
+
+                    print(f"[ARCHIVE] Report saved: {version_id}, stock updated: {request.symbol}")
+
+                    db_conn.close()
+            except Exception as archive_error:
+                print(f"[WARN] Failed to save to database: {archive_error}")
+                import traceback
+                traceback.print_exc()
+
+        # 6. 构建响应（提取分析内容，移除 markdown 代码块）
+        result = {
+            "symbol": meeting_result["symbol"],
+            "stock_name": meeting_result["stock_name"],
+            "current_price": meeting_result["current_price"],
+            "turnover_rate": context.get("turnover_rate", "N/A"),
+            "verdict_chinese": meeting_result["verdict_chinese"],
+            "conviction_stars": meeting_result["conviction_stars"],
+            "cathie_wood": extract_json_content(meeting_result.get("cathie_wood", "")),
+            "nancy_pelosi": extract_json_content(meeting_result.get("nancy_pelosi", "")),
+            "warren_buffett": extract_json_content(meeting_result.get("warren_buffett", "")),
+            "final_verdict": meeting_result["final_verdict"],
+            "summary": get_ic_recommendation_summary(meeting_result),
+            "technical_score": meeting_result.get("technical_score", 50),
+            "fundamental_score": meeting_result.get("fundamental_score", 50),
+            "agent_scores": meeting_result.get("agent_scores"),
+            "dashboard_position": meeting_result.get("dashboard_position"),
+            # V1.6 新增：版本信息
+            "report_id": report_id,
+            "version_id": version_id,
+            "saved_to_db": saved_to_db
+        }
+
+        # Log response size for debugging
+        import json
+        result_json = json.dumps(result, ensure_ascii=False)
+        response_size_kb = len(result_json.encode('utf-8')) / 1024
+        print(f"[SUCCESS] IC meeting completed for {request.symbol}: {meeting_result['verdict_chinese']}", flush=True)
+        print(f"[DEBUG] Response size: {response_size_kb:.1f} KB, returning to client...", flush=True)
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+        # 返回错误响应而不是抛出异常
+        return {
+            "symbol": request.symbol,
+            "error": str(e)[:500],
+            "stock_name": request.symbol,
+            "verdict_chinese": "分析失败",
+            "conviction_stars": "*",
+            "cathie_wood": f"分析失败: {str(e)[:200]}",
+            "nancy_pelosi": "",
+            "warren_buffett": "",
+            "final_verdict": {"final_verdict": "HOLD"},
+            "summary": f"分析失败: {str(e)}",
+            "technical_score": 50,
+            "fundamental_score": 50,
+            "saved_to_db": False
+        }
+    finally:
+        # 确保数据库连接被关闭
+        if db_conn:
+            try:
+                db_conn.close()
+            except:
+                pass
+    """
     召开AI投委会会议 - 完整实现
     """
     import sys
@@ -1281,6 +1630,363 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "technical_score": 50,
             "fundamental_score": 50
         }
+
+
+# ============================================
+# V1.6 版本化管理 API - 历史报告查询
+# ============================================
+
+@app.get("/api/v1/reports")
+async def get_reports(
+    stock_code: Optional[str] = None,
+    verdict: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    获取历史报告列表（带分页和筛选）
+
+    Query Parameters:
+        - stock_code: 股票代码（可选）
+        - verdict: 评级筛选 (BUY/HOLD/SELL，可选)
+        - limit: 每页数量 (默认 50)
+        - offset: 偏移量 (默认 0)
+
+    Returns:
+        {
+            "total": 总数,
+            "reports": 报告列表,
+            "has_more": 是否有更多
+        }
+    """
+    try:
+        from app.models.versioning import ReportHistoryRequest, SuggestionEnum
+        from app.repositories.versioning_repository import ReportRepository
+
+        # 构建查询请求
+        request_filters = ReportHistoryRequest(
+            stock_code=stock_code,
+            verdict=SuggestionEnum(verdict) if verdict else None,
+            limit=min(limit, 100),  # 最大 100
+            offset=offset
+        )
+
+        # 获取数据库连接
+        if not test_mysql_connection():
+            return {
+                "total": 0,
+                "reports": [],
+                "has_more": False,
+                "error": "数据库连接失败"
+            }
+
+        with get_mysql_connection() as db_conn:
+            report_repo = ReportRepository(db_conn)
+            result = await report_repo.get_history(request_filters)
+
+            # 转换为字典格式
+            reports_data = [
+                {
+                    "id": r.id,
+                    "stock_code": r.stock_code,
+                    "stock_name": r.stock_name,
+                    "version_id": r.version_id,
+                    "verdict": r.verdict.value,
+                    "conviction_stars": r.conviction_stars,
+                    "score_growth": r.score_growth,
+                    "score_value": r.score_value,
+                    "score_technical": r.score_technical,
+                    "composite_score": r.composite_score,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "current_price": r.current_price,
+                    "change_percent": r.change_percent
+                }
+                for r in result.reports
+            ]
+
+            return {
+                "total": result.total,
+                "reports": reports_data,
+                "has_more": result.has_more
+            }
+    except Exception as e:
+        print(f"[ERROR] Failed to get reports: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "total": 0,
+            "reports": [],
+            "has_more": False,
+            "error": str(e)[:500]
+        }
+
+
+@app.get("/api/v1/reports/{report_id}")
+async def get_report_detail(report_id: str):
+    """
+    获取单个报告详情（用于抽屉预览）
+
+    Path Parameters:
+        - report_id: 报告 UUID
+
+    Returns:
+        {
+            "id": "uuid",
+            "stock_code": "002050",
+            "stock_name": "三花智控",
+            "version_id": "v20250216_1430",
+            "content": "Markdown 全文",
+            "cathie_wood_analysis": "...",
+            "nancy_pelosi_analysis": "...",
+            "warren_buffett_analysis": "...",
+            "charlie_munger_analysis": "...",
+            "score_growth": 35,
+            "score_value": 45,
+            "score_technical": 65,
+            "composite_score": 48,
+            "verdict": "SELL",
+            "conviction_level": 4,
+            "conviction_stars": "****",
+            "financial_data": {...},
+            "created_at": "2025-02-16T14:30:00"
+        }
+    """
+    try:
+        from app.repositories.versioning_repository import ReportRepository
+
+        if not test_mysql_connection():
+            raise HTTPException(status_code=503, detail="数据库连接失败")
+
+        with get_mysql_connection() as db_conn:
+            report_repo = ReportRepository(db_conn)
+            report = await report_repo.get_by_id(report_id)
+
+            if not report:
+                raise HTTPException(status_code=404, detail="报告不存在")
+
+            return {
+                "id": report.id,
+                "stock_code": report.stock_code,
+                "stock_name": report.stock_name,
+                "version_id": report.version_id,
+                "content": report.content,
+                "cathie_wood_analysis": report.cathie_wood_analysis,
+                "nancy_pelosi_analysis": report.nancy_pelosi_analysis,
+                "warren_buffett_analysis": report.warren_buffett_analysis,
+                "charlie_munger_analysis": report.charlie_munger_analysis,
+                "score_growth": report.score_growth,
+                "score_value": report.score_value,
+                "score_technical": report.score_technical,
+                "composite_score": report.composite_score,
+                "verdict": report.verdict.value,
+                "conviction_level": report.conviction_level,
+                "conviction_stars": report.conviction_stars,
+                "financial_data": report.financial_data,
+                "created_at": report.created_at.isoformat() if report.created_at else None
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get report detail: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e)[:500])
+
+
+@app.get("/api/v1/reports/stock/{stock_code}")
+async def get_stock_reports(stock_code: str, limit: int = 20, offset: int = 0):
+    """
+    获取指定股票的历史报告列表
+
+    Path Parameters:
+        - stock_code: 股票代码 (如: 002050)
+
+    Query Parameters:
+        - limit: 每页数量 (默认 20)
+        - offset: 偏移量 (默认 0)
+
+    Returns:
+        {
+            "stock_code": "002050",
+            "stock_name": "三花智控",
+            "total": 5,
+            "reports": [...]
+        }
+    """
+    try:
+        from app.repositories.versioning_repository import ReportRepository, StockRepository
+
+        if not test_mysql_connection():
+            raise HTTPException(status_code=503, detail="数据库连接失败")
+
+        with get_mysql_connection() as db_conn:
+            # 获取股票信息
+            stock_repo = StockRepository(db_conn)
+            stock = await stock_repo.get_by_code(stock_code)
+
+            if not stock:
+                raise HTTPException(status_code=404, detail="股票不存在")
+
+            # 获取历史报告
+            report_repo = ReportRepository(db_conn)
+            reports = await report_repo.get_by_stock_code(
+                stock_code=stock_code,
+                limit=min(limit, 100),
+                offset=offset
+            )
+
+            # 获取总数
+            from app.models.versioning import ReportHistoryRequest
+            history_result = await report_repo.get_history(
+                ReportHistoryRequest(stock_code=stock_code, limit=9999, offset=0)
+            )
+
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock.name,
+                "industry": stock.industry,
+                "market": stock.market.value if stock.market else None,
+                "total": history_result.total,
+                "reports": [
+                    {
+                        "id": r.id,
+                        "version_id": r.version_id,
+                        "verdict": r.verdict.value,
+                        "conviction_stars": r.conviction_stars,
+                        "score_growth": r.score_growth,
+                        "score_value": r.score_value,
+                        "score_technical": r.score_technical,
+                        "composite_score": r.composite_score,
+                        "created_at": r.created_at.isoformat() if r.created_at else None
+                    }
+                    for r in reports
+                ]
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get stock reports: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e)[:500])
+
+
+@app.get("/api/v1/stocks")
+async def get_stocks(
+    market: Optional[str] = None,
+    industry: Optional[str] = None,
+    suggestion: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    获取股票列表（用于 Portfolio 页面）
+
+    Query Parameters:
+        - market: 市场类型 (A/H/US)
+        - industry: 行业筛选
+        - suggestion: 建议筛选 (BUY/HOLD/SELL)
+        - limit: 每页数量 (默认 50)
+        - offset: 偏移量 (默认 0)
+
+    Returns:
+        {
+            "total": 总数,
+            "stocks": [...]
+        }
+    """
+    try:
+        from app.models.versioning import MarketEnum, SuggestionEnum, DashboardStockItem
+        from app.repositories.versioning_repository import DashboardRepository
+
+        if not test_mysql_connection():
+            raise HTTPException(status_code=503, detail="数据库连接失败")
+
+        with get_mysql_connection() as db_conn:
+            dashboard_repo = DashboardRepository(db_conn)
+
+            # 筛选参数
+            suggestion_enum = SuggestionEnum(suggestion) if suggestion else None
+
+            stocks = await dashboard_repo.get_stocks(
+                limit=min(limit, 100),
+                offset=offset,
+                suggestion=suggestion_enum
+            )
+
+            # 转换为字典格式
+            stocks_data = [
+                {
+                    "code": s.code,
+                    "name": s.name,
+                    "market": s.market.value if s.market else None,
+                    "industry": s.industry,
+                    "current_price": s.current_price,
+                    "change_percent": s.change_percent,
+                    "turnover_rate": s.turnover_rate,
+                    "latest_score_growth": s.latest_score_growth,
+                    "latest_score_value": s.latest_score_value,
+                    "latest_score_technical": s.latest_score_technical,
+                    "latest_suggestion": s.latest_suggestion.value if s.latest_suggestion else None,
+                    "latest_conviction": s.latest_conviction,
+                    "composite_score": s.composite_score,
+                    "latest_report_time": s.latest_report_time.isoformat() if s.latest_report_time else None,
+                    "report_count": s.report_count
+                }
+                for s in stocks
+            ]
+
+            return {
+                "stocks": stocks_data,
+                "count": len(stocks_data)
+            }
+    except Exception as e:
+        print(f"[ERROR] Failed to get stocks: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e)[:500])
+
+
+@app.get("/api/v1/dashboard/stats")
+async def get_dashboard_stats():
+    """
+    获取 Dashboard 统计数据
+
+    Returns:
+        {
+            "total_stocks": 股票总数,
+            "total_reports": 报告总数,
+            "buy_count": 买入数量,
+            "hold_count": 持有数量,
+            "sell_count": 卖出数量,
+            "avg_growth_score": 平均成长得分,
+            "avg_value_score": 平均价值得分
+        }
+    """
+    try:
+        from app.repositories.versioning_repository import DashboardRepository
+
+        if not test_mysql_connection():
+            raise HTTPException(status_code=503, detail="数据库连接失败")
+
+        with get_mysql_connection() as db_conn:
+            dashboard_repo = DashboardRepository(db_conn)
+            stats = await dashboard_repo.get_stats()
+
+            return {
+                "total_stocks": stats.total_stocks,
+                "total_reports": stats.total_reports,
+                "buy_count": stats.buy_count,
+                "hold_count": stats.hold_count,
+                "sell_count": stats.sell_count,
+                "avg_growth_score": stats.avg_growth_score,
+                "avg_value_score": stats.avg_value_score
+            }
+    except Exception as e:
+        print(f"[ERROR] Failed to get dashboard stats: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e)[:500])
 
 
 # ============================================

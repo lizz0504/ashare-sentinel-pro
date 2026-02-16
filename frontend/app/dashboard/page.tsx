@@ -123,6 +123,7 @@ export default function DashboardPage() {
         timestamp: Date.now()
       }))
 
+      // ✅ 修复：保存完整报告到 localStorage
       addAnalysisRecord({
         type: 'dashboard',
         symbol: data.symbol,
@@ -131,7 +132,8 @@ export default function DashboardPage() {
         technical_score: data.technical_score,
         fundamental_score: data.fundamental_score,
         verdict_chinese: data.verdict_chinese,
-        conviction_stars: data.conviction_stars
+        conviction_stars: data.conviction_stars,
+        full_report: JSON.stringify(data, null, 2)  // ✅ 添加完整报告
       })
     } catch (err) {
       console.error("Analysis failed:", err)
