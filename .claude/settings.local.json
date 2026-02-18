@@ -57,7 +57,19 @@
       "Bash(git rm:*)",
       "Bash(tail:*)",
       "Bash(cat:*)",
-      "Read(//d/**)"
+      "Read(//d/**)",
+      "Bash(uvicorn:*)",
+      "Bash(for:*)",
+      "Bash(do taskkill:*)",
+      "Bash(done)",
+      "Bash(do)",
+      "Bash(echo:*)",
+      "Bash(npx kill-port:*)",
+      "Bash(python3:*)",
+      "Bash(lsof:*)",
+      "Bash(ps:*)",
+      "Bash(set PYTHONPATH=D:CC CODEAShare-Sentinel-Probackend)",
+      "Bash(git restore:*)"
     ]
   }
 }

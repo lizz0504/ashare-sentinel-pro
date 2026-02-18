@@ -1,30 +1,56 @@
 # AShare Sentinel Pro
 
-> 智能A股投资复盘系统 - V1.0
+> 基于AI投委会的智能A股分析系统 - V2.0
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![Next.js](https://img.shields.io/badge/next.js-15-black.svg)](https://nextjs.org/)
+[![Next.js](https://img.shields.io/badge/next.js-14-black.svg)](https://nextjs.org/)
 
-## 功能特性
+## 🎯 核心功能
 
-### 📊 智能复盘
-- **持仓管理** - 添加/删除A股持仓，实时追踪
-- **技术分析** - MA5/MA20均线、Alpha超额收益、K线形态识别
-- **健康评分** - 0-100分综合评分系统
-- **市场情绪** - 基于沪深300的贪婪/恐慌指数
+### 🤖 AI投委会分析
+4个AI Agent独立分析，最终由Charlie Munger裁决：
+- **Cathie Wood** - 成长投资视角
+- **Nancy Pelosi** - 技术分析视角
+- **Warren Buffett** - 价值投资视角
+- **Charlie Munger** - 最终裁决
 
-### 🤖 AI分析
-- 自动生成周度复盘报告
-- K线形态智能解读（金针探底、冲高回落等）
-- 个性化投资建议（强烈买入/买入/持有/卖出/强烈卖出）
-- 投资名言引用
+### 📊 五维雷达图
+基于IC评分计算的5个维度：
+- **价值评分** (Warren Buffett评分)
+- **成长评分** (Cathie Wood评分)
+- **安全评分** (基于ROE和负债率)
+- **股息评分** (基于PB)
+- **趋势评分** (Nancy Pelosi评分)
 
-### 📈 实时数据
-- 集成AkShare获取实时股价
-- 自动从AkShare获取股票名称和行业信息
-- 支持个股刷新和批量刷新
-- 生成可导出的文字报告
+### 💾 版本化管理
+每次分析自动保存到Supabase，支持历史追溯。
+
+## 🏗️ 项目架构（完全解耦）
+
+```
+AShare-Sentinel-Pro/
+├── backend/                 # 后端API服务（FastAPI）
+│   ├── app/                # 应用代码
+│   ├── .env                # 环境变量（独立配置）
+│   ├── .env.example        # 环境变量模板
+│   └── README.md           # 后端详细文档
+├── frontend/               # 前端Web界面（Next.js）
+│   ├── app/               # 应用代码
+│   ├── .env.local         # 环境变量（独立配置）
+│   ├── .env.example       # 环境变量模板
+│   └── README.md          # 前端详细文档
+├── check_quality.sh       # 质量检查脚本
+├── auto_commit.sh         # 自动提交脚本
+├── DEVELOPMENT_LOG.md     # 开发日志（⚠️ 每次修改必读！）
+└── README.md             # 本文件
+```
+
+### 设计理念
+- **前后端分离**: 独立开发、独立部署、独立测试
+- **配置隔离**: 后端用 `.env`，前端用 `.env.local`，互不干扰
+- **数据库统一**: 唯一数据源是 Supabase PostgreSQL
+- **质量保证**: 自动化检查 + Git Hooks
 
 ## 技术栈
 

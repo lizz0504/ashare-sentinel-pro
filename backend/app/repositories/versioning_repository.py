@@ -53,14 +53,14 @@ class StockRepository:
 
     async def get_by_code(self, code: str) -> Optional[StockResponse]:
         """根据代码获取股票"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         sql = """
             SELECT
                 s.*,
                 (IFNULL(s.latest_score_growth, 50) + IFNULL(s.latest_score_value, 50)) / 2 AS composite_score,
-                (SELECT MAX(created_at) FROM analysis_reports WHERE stock_code = s.code) AS latest_report_time,
-                (SELECT COUNT(*) FROM analysis_reports WHERE stock_code = s.code) AS report_count
+                (SELECT MAX(created_at) FROM reports WHERE stock_code = s.code) AS latest_report_time,
+                (SELECT COUNT(*) FROM reports WHERE stock_code = s.code) AS report_count
             FROM stocks s
             WHERE s.code = %s
         """
@@ -80,7 +80,7 @@ class StockRepository:
         offset: int = 0
     ) -> List[StockResponse]:
         """获取股票列表"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         conditions = []
         params = []
@@ -99,8 +99,8 @@ class StockRepository:
             SELECT
                 s.*,
                 (IFNULL(s.latest_score_growth, 50) + IFNULL(s.latest_score_value, 50)) / 2 AS composite_score,
-                (SELECT MAX(created_at) FROM analysis_reports WHERE stock_code = s.code) AS latest_report_time,
-                (SELECT COUNT(*) FROM analysis_reports WHERE stock_code = s.code) AS report_count
+                (SELECT MAX(created_at) FROM reports WHERE stock_code = s.code) AS latest_report_time,
+                (SELECT COUNT(*) FROM reports WHERE stock_code = s.code) AS report_count
             FROM stocks s
             WHERE {where_clause}
             ORDER BY s.updated_at DESC
@@ -236,7 +236,7 @@ class ReportRepository:
 
     async def create(self, report: ReportCreate) -> ReportResponse:
         """创建新报告"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         # 生成版本号
         version_id = datetime.now().strftime("v%Y%m%d_%H%M")
@@ -247,19 +247,19 @@ class ReportRepository:
         composite_score = sum(valid_scores) // len(valid_scores) if valid_scores else None
 
         sql = """
-            INSERT INTO analysis_reports
-            (id, stock_code, version_id, content,
+            INSERT INTO reports
+            (id, stock_code, stock_name, version_id, content,
              cathie_wood_analysis, nancy_pelosi_analysis, warren_buffett_analysis, charlie_munger_analysis,
              score_growth, score_value, score_technical, composite_score,
              verdict, conviction_level, conviction_stars, financial_data)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         report_id = str(uuid4())
         financial_json = json.dumps(report.financial_data) if report.financial_data else None
 
         cursor.execute(sql, (
-            report_id, report.stock_code, version_id, report.content,
+            report_id, report.stock_code, report.stock_name, version_id, report.content,
             report.cathie_wood_analysis, report.nancy_pelosi_analysis,
             report.warren_buffett_analysis, report.charlie_munger_analysis,
             report.score_growth, report.score_value, report.score_technical, composite_score,
@@ -272,7 +272,7 @@ class ReportRepository:
 
     async def get_by_id(self, report_id: str) -> Optional[ReportResponse]:
         """根据 ID 获取报告"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         sql = """
             SELECT
@@ -280,7 +280,7 @@ class ReportRepository:
                 s.name AS stock_name,
                 s.current_price,
                 s.change_percent
-            FROM analysis_reports r
+            FROM reports r
             JOIN stocks s ON r.stock_code = s.code
             WHERE r.id = %s
         """
@@ -299,7 +299,7 @@ class ReportRepository:
         offset: int = 0
     ) -> List[ReportListItem]:
         """获取股票的报告历史"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         sql = """
             SELECT
@@ -316,7 +316,7 @@ class ReportRepository:
                 r.created_at,
                 s.current_price,
                 s.change_percent
-            FROM analysis_reports r
+            FROM reports r
             JOIN stocks s ON r.stock_code = s.code
             WHERE r.stock_code = %s
             ORDER BY r.created_at DESC
@@ -329,7 +329,7 @@ class ReportRepository:
 
     async def get_history(self, request: ReportHistoryRequest) -> ReportHistoryResponse:
         """获取报告历史（带筛选）"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         # 构建查询条件
         conditions = []
@@ -356,7 +356,7 @@ class ReportRepository:
         # 查询总数
         count_sql = f"""
             SELECT COUNT(*) as total
-            FROM analysis_reports r
+            FROM reports r
             WHERE {where_clause}
         """
         cursor.execute(count_sql, tuple(params))
@@ -380,7 +380,7 @@ class ReportRepository:
                 r.created_at,
                 s.current_price,
                 s.change_percent
-            FROM analysis_reports r
+            FROM reports r
             JOIN stocks s ON r.stock_code = s.code
             WHERE {where_clause}
             ORDER BY r.created_at DESC
@@ -400,7 +400,7 @@ class ReportRepository:
 
     async def get_latest_by_stock(self, stock_code: str) -> Optional[ReportResponse]:
         """获取股票的最新报告"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         sql = """
             SELECT
@@ -408,7 +408,7 @@ class ReportRepository:
                 s.name AS stock_name,
                 s.current_price,
                 s.change_percent
-            FROM analysis_reports r
+            FROM reports r
             JOIN stocks s ON r.stock_code = s.code
             WHERE r.stock_code = %s
             ORDER BY r.created_at DESC
@@ -426,7 +426,7 @@ class ReportRepository:
         """删除报告"""
         cursor = self.db_conn.cursor()
 
-        sql = "DELETE FROM analysis_reports WHERE id = %s"
+        sql = "DELETE FROM reports WHERE id = %s"
         cursor.execute(sql, (report_id,))
         self.db_conn.commit()
 
@@ -498,7 +498,7 @@ class DashboardRepository:
         suggestion: Optional[SuggestionEnum] = None
     ) -> List[DashboardStockItem]:
         """获取 Dashboard 股票列表"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         where_clause = ""
         params = []
@@ -521,7 +521,7 @@ class DashboardRepository:
 
     async def get_stats(self) -> DashboardStats:
         """获取 Dashboard 统计数据"""
-        cursor = self.db_conn.cursor(dictionary=True)
+        cursor = self.db_conn.cursor()
 
         sql = """
             SELECT

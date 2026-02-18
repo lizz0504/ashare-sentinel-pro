@@ -1374,7 +1374,62 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
                 import traceback
                 traceback.print_exc()
 
-        # 6. 构建响应（提取分析内容，移除 markdown 代码块）
+        # 6. 计算雷达图数据（基于IC投委会评分）
+        agent_scores = meeting_result.get("agent_scores", {})
+        cathie_score = agent_scores.get("cathie_wood", {}).get("score", 50)
+        nancy_score = agent_scores.get("nancy_pelosi", {}).get("score", 50)
+        warren_score = agent_scores.get("warren_buffett", {}).get("score", 50)
+
+        # Helper function to safely convert values to float
+        def safe_float_convert(value, default=0):
+            if value is None or value == 'N/A':
+                return default
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                # Remove % sign and whitespace
+                cleaned = value.replace('%', '').strip()
+                try:
+                    return float(cleaned)
+                except ValueError:
+                    return default
+            return default
+
+        # 计算安全评分（基于ROE和负债率）
+        roe = safe_float_convert(context.get("roe"), 0)
+        debt_to_equity = safe_float_convert(context.get("debt_to_equity"), 50)
+        safety_score = min(100, max(0, (roe * 10) + (100 - debt_to_equity) / 2))
+
+        # 计算股息评分（基于PE/PB）
+        pb = safe_float_convert(context.get("pb_ratio"), 100)
+        dividend_score = min(100, max(0, 100 - pb * 2))  # PB越低，股息潜力越高
+
+        advanced_metrics = {
+            "radar": {
+                "value_score": int(warren_score),  # 价值评分 = Warren Buffett评分
+                "growth_score": int(cathie_score),  # 成长评分 = Cathie Wood评分
+                "safety_score": int(safety_score),  # 安全评分 = 基于ROE和负债率
+                "dividend_score": int(dividend_score),  # 股息评分 = 基于PB
+                "trend_score": int(nancy_score)  # 趋势评分 = Nancy Pelosi评分
+            },
+            "technical": {
+                "rps": int(meeting_result.get("technical_score", 50)),
+                "deviation": 0,
+                "ma200_deviation": 0
+            },
+            "capital": {
+                "purity": 80,
+                "control_duration": 5,
+                "accumulation_strength": 60
+            },
+            "fundamental": {
+                "peg": None,
+                "growth_rate": int(cathie_score),
+                "beta": 1.0
+            }
+        }
+
+        # 7. 构建响应（提取分析内容，移除 markdown 代码块）
         result = {
             "symbol": meeting_result["symbol"],
             "stock_name": meeting_result["stock_name"],
@@ -1391,6 +1446,7 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             "fundamental_score": meeting_result.get("fundamental_score", 50),
             "agent_scores": meeting_result.get("agent_scores"),
             "dashboard_position": meeting_result.get("dashboard_position"),
+            "advanced_metrics": advanced_metrics,  # 新增：雷达图数据
             # V1.6 新增：版本信息
             "report_id": report_id,
             "version_id": version_id,
@@ -1719,275 +1775,6 @@ async def get_reports(
             "has_more": False,
             "error": str(e)[:500]
         }
-
-
-@app.get("/api/v1/reports/{report_id}")
-async def get_report_detail(report_id: str):
-    """
-    获取单个报告详情（用于抽屉预览）
-
-    Path Parameters:
-        - report_id: 报告 UUID
-
-    Returns:
-        {
-            "id": "uuid",
-            "stock_code": "002050",
-            "stock_name": "三花智控",
-            "version_id": "v20250216_1430",
-            "content": "Markdown 全文",
-            "cathie_wood_analysis": "...",
-            "nancy_pelosi_analysis": "...",
-            "warren_buffett_analysis": "...",
-            "charlie_munger_analysis": "...",
-            "score_growth": 35,
-            "score_value": 45,
-            "score_technical": 65,
-            "composite_score": 48,
-            "verdict": "SELL",
-            "conviction_level": 4,
-            "conviction_stars": "****",
-            "financial_data": {...},
-            "created_at": "2025-02-16T14:30:00"
-        }
-    """
-    try:
-        from app.repositories.versioning_repository import ReportRepository
-
-        if not test_mysql_connection():
-            raise HTTPException(status_code=503, detail="数据库连接失败")
-
-        with get_mysql_connection() as db_conn:
-            report_repo = ReportRepository(db_conn)
-            report = await report_repo.get_by_id(report_id)
-
-            if not report:
-                raise HTTPException(status_code=404, detail="报告不存在")
-
-            return {
-                "id": report.id,
-                "stock_code": report.stock_code,
-                "stock_name": report.stock_name,
-                "version_id": report.version_id,
-                "content": report.content,
-                "cathie_wood_analysis": report.cathie_wood_analysis,
-                "nancy_pelosi_analysis": report.nancy_pelosi_analysis,
-                "warren_buffett_analysis": report.warren_buffett_analysis,
-                "charlie_munger_analysis": report.charlie_munger_analysis,
-                "score_growth": report.score_growth,
-                "score_value": report.score_value,
-                "score_technical": report.score_technical,
-                "composite_score": report.composite_score,
-                "verdict": report.verdict.value,
-                "conviction_level": report.conviction_level,
-                "conviction_stars": report.conviction_stars,
-                "financial_data": report.financial_data,
-                "created_at": report.created_at.isoformat() if report.created_at else None
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[ERROR] Failed to get report detail: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e)[:500])
-
-
-@app.get("/api/v1/reports/stock/{stock_code}")
-async def get_stock_reports(stock_code: str, limit: int = 20, offset: int = 0):
-    """
-    获取指定股票的历史报告列表
-
-    Path Parameters:
-        - stock_code: 股票代码 (如: 002050)
-
-    Query Parameters:
-        - limit: 每页数量 (默认 20)
-        - offset: 偏移量 (默认 0)
-
-    Returns:
-        {
-            "stock_code": "002050",
-            "stock_name": "三花智控",
-            "total": 5,
-            "reports": [...]
-        }
-    """
-    try:
-        from app.repositories.versioning_repository import ReportRepository, StockRepository
-
-        if not test_mysql_connection():
-            raise HTTPException(status_code=503, detail="数据库连接失败")
-
-        with get_mysql_connection() as db_conn:
-            # 获取股票信息
-            stock_repo = StockRepository(db_conn)
-            stock = await stock_repo.get_by_code(stock_code)
-
-            if not stock:
-                raise HTTPException(status_code=404, detail="股票不存在")
-
-            # 获取历史报告
-            report_repo = ReportRepository(db_conn)
-            reports = await report_repo.get_by_stock_code(
-                stock_code=stock_code,
-                limit=min(limit, 100),
-                offset=offset
-            )
-
-            # 获取总数
-            from app.models.versioning import ReportHistoryRequest
-            history_result = await report_repo.get_history(
-                ReportHistoryRequest(stock_code=stock_code, limit=9999, offset=0)
-            )
-
-            return {
-                "stock_code": stock_code,
-                "stock_name": stock.name,
-                "industry": stock.industry,
-                "market": stock.market.value if stock.market else None,
-                "total": history_result.total,
-                "reports": [
-                    {
-                        "id": r.id,
-                        "version_id": r.version_id,
-                        "verdict": r.verdict.value,
-                        "conviction_stars": r.conviction_stars,
-                        "score_growth": r.score_growth,
-                        "score_value": r.score_value,
-                        "score_technical": r.score_technical,
-                        "composite_score": r.composite_score,
-                        "created_at": r.created_at.isoformat() if r.created_at else None
-                    }
-                    for r in reports
-                ]
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[ERROR] Failed to get stock reports: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e)[:500])
-
-
-@app.get("/api/v1/stocks")
-async def get_stocks(
-    market: Optional[str] = None,
-    industry: Optional[str] = None,
-    suggestion: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0
-):
-    """
-    获取股票列表（用于 Portfolio 页面）
-
-    Query Parameters:
-        - market: 市场类型 (A/H/US)
-        - industry: 行业筛选
-        - suggestion: 建议筛选 (BUY/HOLD/SELL)
-        - limit: 每页数量 (默认 50)
-        - offset: 偏移量 (默认 0)
-
-    Returns:
-        {
-            "total": 总数,
-            "stocks": [...]
-        }
-    """
-    try:
-        from app.models.versioning import MarketEnum, SuggestionEnum, DashboardStockItem
-        from app.repositories.versioning_repository import DashboardRepository
-
-        if not test_mysql_connection():
-            raise HTTPException(status_code=503, detail="数据库连接失败")
-
-        with get_mysql_connection() as db_conn:
-            dashboard_repo = DashboardRepository(db_conn)
-
-            # 筛选参数
-            suggestion_enum = SuggestionEnum(suggestion) if suggestion else None
-
-            stocks = await dashboard_repo.get_stocks(
-                limit=min(limit, 100),
-                offset=offset,
-                suggestion=suggestion_enum
-            )
-
-            # 转换为字典格式
-            stocks_data = [
-                {
-                    "code": s.code,
-                    "name": s.name,
-                    "market": s.market.value if s.market else None,
-                    "industry": s.industry,
-                    "current_price": s.current_price,
-                    "change_percent": s.change_percent,
-                    "turnover_rate": s.turnover_rate,
-                    "latest_score_growth": s.latest_score_growth,
-                    "latest_score_value": s.latest_score_value,
-                    "latest_score_technical": s.latest_score_technical,
-                    "latest_suggestion": s.latest_suggestion.value if s.latest_suggestion else None,
-                    "latest_conviction": s.latest_conviction,
-                    "composite_score": s.composite_score,
-                    "latest_report_time": s.latest_report_time.isoformat() if s.latest_report_time else None,
-                    "report_count": s.report_count
-                }
-                for s in stocks
-            ]
-
-            return {
-                "stocks": stocks_data,
-                "count": len(stocks_data)
-            }
-    except Exception as e:
-        print(f"[ERROR] Failed to get stocks: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e)[:500])
-
-
-@app.get("/api/v1/dashboard/stats")
-async def get_dashboard_stats():
-    """
-    获取 Dashboard 统计数据
-
-    Returns:
-        {
-            "total_stocks": 股票总数,
-            "total_reports": 报告总数,
-            "buy_count": 买入数量,
-            "hold_count": 持有数量,
-            "sell_count": 卖出数量,
-            "avg_growth_score": 平均成长得分,
-            "avg_value_score": 平均价值得分
-        }
-    """
-    try:
-        from app.repositories.versioning_repository import DashboardRepository
-
-        if not test_mysql_connection():
-            raise HTTPException(status_code=503, detail="数据库连接失败")
-
-        with get_mysql_connection() as db_conn:
-            dashboard_repo = DashboardRepository(db_conn)
-            stats = await dashboard_repo.get_stats()
-
-            return {
-                "total_stocks": stats.total_stocks,
-                "total_reports": stats.total_reports,
-                "buy_count": stats.buy_count,
-                "hold_count": stats.hold_count,
-                "sell_count": stats.sell_count,
-                "avg_growth_score": stats.avg_growth_score,
-                "avg_value_score": stats.avg_value_score
-            }
-    except Exception as e:
-        print(f"[ERROR] Failed to get dashboard stats: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e)[:500])
-
 
 # ============================================
 # 认证测试接口

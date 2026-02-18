@@ -16,9 +16,13 @@ from app.core.config import settings
 # MySQL 配置
 MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_USER = os.getenv("MYSQL_USER", "ashare_user")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "ashare_pass")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "ashare_sentinel")
+
+# 调试：打印配置
+import sys
+print(f"[DEBUG MySQL] Host={MYSQL_HOST}, User={MYSQL_USER}, Database={MYSQL_DATABASE}", file=sys.stderr)
 
 
 @contextmanager

@@ -137,6 +137,7 @@ class FinancialSnapshot(BaseModel):
 class ReportCreate(BaseModel):
     """创建报告请求"""
     stock_code: str = Field(..., min_length=6, max_length=10, description="股票代码")
+    stock_name: Optional[str] = Field(None, description="股票名称")
     content: Optional[str] = Field(None, description="专家辩论全文 (Markdown)")
     cathie_wood_analysis: Optional[str] = None
     nancy_pelosi_analysis: Optional[str] = None
