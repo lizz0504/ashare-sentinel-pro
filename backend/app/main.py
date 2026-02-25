@@ -76,8 +76,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 标准库导入
-import uuid # noqa: F401
-import asyncio # noqa: F401
 import logging
 from typing import Literal, Optional
 
@@ -1443,30 +1441,14 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
         if db_conn:
             try:
                 db_conn.close()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to close database connection: {e}")
     """
     召开AI投委会会议 - 完整实现
     """
     import sys
     import os
     import re
-
-    def extract_json_content(text: str) -> str:
-        """提取分析内容，移除 JSON 代码块和标题标记"""
-        if not text:
-            return text
-        # 查找 ```json ... ``` 代码块
-        json_match = re.search(r'```json\s*\n?\s*\{.*?\}\s*\n?```', text, re.DOTALL)
-        if json_match:
-            # 提取 JSON 后面的内容
-            content = text[json_match.end():]
-            # 移除【第二步：详细分析】等标题标记
-            content = re.sub(r'【.*?】.*?\n', '', content)
-            return content.strip()
-        # 如果没有找到代码块，尝试移除标题标记
-        content = re.sub(r'【.*?】.*?\n', '', text)
-        return content.strip()
 
     try:
         # 1. 获取基本股票信息 (包含当前价格)

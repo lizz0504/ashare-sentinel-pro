@@ -98,7 +98,7 @@ DATABASE_URL=your_supabase_database_url
 DASHSCOPE_API_KEY=your_dashscope_api_key  # 可选
 
 # frontend/.env.local
-NEXT_PUBLIC_API_URL=http://localhost:8003
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 4. 启动服务
@@ -114,8 +114,8 @@ npm run dev
 
 5. 访问应用
 - 前端: http://localhost:3000
-- 后端API: http://localhost:8003
-- API文档: http://localhost:8003/docs
+- 后端API: http://localhost:8000
+- API文档: http://localhost:8000/docs
 
 ## 使用说明
 
@@ -162,7 +162,7 @@ npm run dev
 | `/api/v1/market/sentiment` | GET | 市场情绪 |
 | `/api/v1/report/generate` | GET | 生成报告 |
 
-完整API文档：http://localhost:8003/docs
+完整API文档：http://localhost:8000/docs
 
 ## 数据来源
 
