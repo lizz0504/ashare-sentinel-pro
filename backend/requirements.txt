@@ -5,6 +5,7 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.9
 pydantic>=2.9.0
+pydantic-settings>=2.0.0
 
 # ============================================
 # Database & Supabase
@@ -32,6 +33,9 @@ numpy>=1.24.0
 # AI & LLM
 # ============================================
 openai>=1.0.0
+dashscope>=1.0.0
+zhipuai>=2.0.0
+volcengine>=1.0.0
 
 # ============================================
 # Chinese Stock Data
