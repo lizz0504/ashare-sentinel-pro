@@ -104,6 +104,10 @@ from app.services.committee_service import CommitteeService
 from app.core.db import get_db_client
 
 # 配置日志根logger
+# 确保日志目录和文件存在
+import os
+os.makedirs(os.path.dirname(settings.LOG_FILE_PATH), exist_ok=True)
+
 # 确保日志文件使用 UTF-8 编码
 _file_handler = logging.FileHandler(settings.LOG_FILE_PATH, encoding='utf-8')
 _file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
