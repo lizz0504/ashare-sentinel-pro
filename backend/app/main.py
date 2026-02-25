@@ -105,16 +105,6 @@ from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, 
 from app.services.committee_service import CommitteeService
 from app.core.db import get_db_client
 
-# V1.6 版本化管理导入
-from app.models.versioning import (
-    StockCreate, ReportCreate, SuggestionEnum,
-    ICMeetingRequestV2, ICMeetingResponseV2
-)
-from app.repositories.versioning_repository import (
-    StockRepository, ReportRepository
-)
-from app.core.db_mysql import get_mysql_connection, test_mysql_connection
-
 # 配置日志根logger
 # 确保日志文件使用 UTF-8 编码
 _file_handler = logging.FileHandler(settings.LOG_FILE_PATH, encoding='utf-8')
@@ -127,36 +117,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
-# JWT 鉴权依赖
-from app.deps import get_current_user, get_current_user_optional
-
-from app.services.ocr_service import process_pdf
-from app.services.llm_service import generate_chat_response, classify_stock, generate_portfolio_review
-from app.services.market_service import (
-    get_stock_info,
-    get_weekly_performance,
-    validate_symbol,
-    get_market_sentiment,
-    get_stock_technical_analysis,
-    calculate_financial_metrics
-)
-from app.services.market_service_baostock import get_financials_baostock
-from app.services.ic_service import conduct_meeting, format_ic_meeting_summary, get_ic_recommendation_summary
-from app.services.committee_service import CommitteeService
-from app.core.db import get_db_client
-
-# V1.6 版本化管理导入
-from app.models.versioning import (
-    StockCreate, ReportCreate, SuggestionEnum,
-    ICMeetingRequestV2, ICMeetingResponseV2
-)
-from app.repositories.versioning_repository import (
-    StockRepository, ReportRepository
-)
-from app.core.db_mysql import get_mysql_connection, test_mysql_connection
-from app.core.config import settings
-
 
 # ============================================
 # Application Configuration
@@ -1270,49 +1230,47 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
             api_key=""
         )
 
-        # 5. 自动归档逻辑 (V1.6 新增)
+        # 5. 自动归档逻辑（使用 Supabase）
         if request.save_to_db:
             try:
-                # 测试数据库连接
-                if not test_mysql_connection():
-                    print("[WARN] MySQL connection failed, skipping database save")
-                else:
-                    db_conn = get_mysql_connection_direct()
+                from app.core.db_supabase import get_supabase_client
+                from app.repositories.supabase_repository import StockRepository, ReportRepository
 
-                    # 5.1 创建或更新股票记录
-                    stock_repo = StockRepository(db_conn)
-                    stock_create = StockCreate(
-                        code=request.symbol,
-                        name=stock_name,
-                        current_price=current_price,
-                        change_percent=metrics_data.get('change_percent'),
-                        turnover_rate=metrics_data.get('turnover_rate')
-                    )
-                    await stock_repo.create(stock_create)
+                # 获取 Supabase 客户端
+                supabase = get_supabase_client()
+                stock_repo = StockRepository(supabase)
+                report_repo = ReportRepository(supabase)
 
-                    # 5.2 解析专家评分
-                    agent_scores = meeting_result.get('agent_scores', {})
-                    score_growth = agent_scores.get('cathie_wood', {}).get('score')
-                    score_value = agent_scores.get('warren_buffett', {}).get('score')
-                    score_technical = meeting_result.get('technical_score')
+                # 5.1 创建或更新股票记录
+                await stock_repo.create(
+                    code=request.symbol,
+                    name=stock_name,
+                    current_price=current_price,
+                    change_percent=metrics_data.get('change_percent'),
+                    turnover_rate=metrics_data.get('turnover_rate')
+                )
 
-                    # 解析评级
-                    verdict_chinese = meeting_result.get('verdict_chinese', '')
-                    conviction_stars = meeting_result.get('conviction_stars', '')
+                # 5.2 解析专家评分
+                agent_scores = meeting_result.get('agent_scores', {})
+                score_growth = agent_scores.get('cathie_wood', {}).get('score')
+                score_value = agent_scores.get('warren_buffett', {}).get('score')
+                score_technical = meeting_result.get('technical_score')
 
-                    # 映射中文评级到英文
-                    verdict_map = {
-                        '买入': SuggestionEnum.BUY,
-                        '持有': SuggestionEnum.HOLD,
-                        '卖出': SuggestionEnum.SELL
-                    }
-                    verdict = verdict_map.get(verdict_chinese, SuggestionEnum.HOLD)
+                # 解析评级
+                verdict_chinese = meeting_result.get('verdict_chinese', '')
+                conviction_stars = meeting_result.get('conviction_stars', '')
 
-                    # 5.3 创建报告记录
-                    report_repo = ReportRepository(db_conn)
+                # 映射中文评级到英文
+                verdict_map = {
+                    '买入': 'BUY',
+                    '持有': 'HOLD',
+                    '卖出': 'SELL'
+                }
+                verdict = verdict_map.get(verdict_chinese, 'HOLD')
 
-                    # 构建 Markdown 内容
-                    content_md = f"""# {stock_name} ({request.symbol}) - IC投委会分析报告
+                # 5.3 创建报告记录
+                # 构建 Markdown 内容
+                content_md = f"""# {stock_name} ({request.symbol}) - IC投委会分析报告
 
 ## 基本信息
 - 当前价格: {current_price}
@@ -1335,42 +1293,41 @@ async def conduct_ic_meeting(request: ICMeetingRequest):
 - 信心程度: {conviction_stars}
 """
 
-                    report_create = ReportCreate(
-                        stock_code=request.symbol,
-                        content=content_md,
-                        cathie_wood_analysis=meeting_result.get('cathie_wood', ''),
-                        nancy_pelosi_analysis=meeting_result.get('nancy_pelosi', ''),
-                        warren_buffett_analysis=meeting_result.get('warren_buffett', ''),
-                        charlie_munger_analysis=str(meeting_result.get('final_verdict', {})),
-                        score_growth=score_growth,
-                        score_value=score_value,
-                        score_technical=score_technical,
-                        verdict=verdict,
-                        conviction_level=len(conviction_stars) if conviction_stars else None,
-                        conviction_stars=conviction_stars,
-                        financial_data=metrics_data
-                    )
+                # 创建报告
+                saved_report = await report_repo.create(
+                    stock_code=request.symbol,
+                    content=content_md,
+                    cathie_wood_analysis=meeting_result.get('cathie_wood', ''),
+                    nancy_pelosi_analysis=meeting_result.get('nancy_pelosi', ''),
+                    warren_buffett_analysis=meeting_result.get('warren_buffett', ''),
+                    charlie_munger_analysis=str(meeting_result.get('final_verdict', {})),
+                    score_growth=score_growth,
+                    score_value=score_value,
+                    score_technical=score_technical,
+                    verdict=verdict,
+                    conviction_level=len(conviction_stars) if conviction_stars else None,
+                    conviction_stars=conviction_stars,
+                    financial_data=metrics_data
+                )
 
-                    saved_report = await report_repo.create(report_create)
-                    report_id = saved_report.id
-                    version_id = saved_report.version_id
-                    saved_to_db = True
+                report_id = saved_report.id
+                version_id = getattr(saved_report, 'version_id', None)
+                saved_to_db = True
 
-                    # 5.4 更新股票表的最新状态
-                    await stock_repo.update_latest_scores(
-                        code=request.symbol,
-                        score_growth=score_growth,
-                        score_value=score_value,
-                        score_technical=score_technical,
-                        suggestion=verdict,
-                        conviction=conviction_stars
-                    )
+                # 5.4 更新股票表的最新状态
+                await stock_repo.update_latest_scores(
+                    code=request.symbol,
+                    score_growth=score_growth,
+                    score_value=score_value,
+                    score_technical=score_technical,
+                    suggestion=verdict,
+                    conviction=conviction_stars
+                )
 
-                    print(f"[ARCHIVE] Report saved: {version_id}, stock updated: {request.symbol}")
+                print(f"[ARCHIVE] Report saved to Supabase: {version_id}, stock updated: {request.symbol}")
 
-                    db_conn.close()
             except Exception as archive_error:
-                print(f"[WARN] Failed to save to database: {archive_error}")
+                print(f"[WARN] Failed to save to Supabase: {archive_error}")
                 import traceback
                 traceback.print_exc()
 
