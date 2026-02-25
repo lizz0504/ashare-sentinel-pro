@@ -51,14 +51,14 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=http://your-server-ip:8000
+        - NEXT_PUBLIC_API_URL=http://${SERVER_IP:-43.134.183.223}:8000
         - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
         - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
     container_name: ashare-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://your-server-ip:8000
+      - NEXT_PUBLIC_API_URL=http://${SERVER_IP:-43.134.183.223}:8000
       - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
       - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
     restart: unless-stopped
