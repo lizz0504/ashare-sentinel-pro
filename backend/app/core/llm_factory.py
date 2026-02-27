@@ -43,7 +43,7 @@ class LLMFactory:
         model: str,
         system: str,
         user: str,
-        timeout: int = 60  # 增加到 60 秒（原 30 秒）
+        timeout: int = 120  # 增加到 120 秒以支持更长的 max_tokens=2000 响应
     ) -> str:
         """快速调用模型"""
         caller = {

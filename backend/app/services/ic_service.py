@@ -40,7 +40,7 @@ logging.basicConfig(level=logging.INFO)
 # =============================================================================
 
 DASHSCOPE_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-DEFAULT_TIMEOUT = 30  # seconds
+DEFAULT_TIMEOUT = 120  # seconds (增加到 120 秒以支持更长的 max_tokens=2000 响应)
 MAX_RETRIES = 3
 
 # Model context limits (保守估计，留出安全边界)
