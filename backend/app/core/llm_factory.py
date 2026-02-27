@@ -98,7 +98,7 @@ class LLMFactory:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user}
                 ],
-                "max_tokens": 500,  # 减少到 500（原 1000）加快响应
+                "max_tokens": 2000,  # 增加到 2000 以支持详细的分析师报告
                 "temperature": 0.7
             },
             timeout
@@ -128,7 +128,7 @@ class LLMFactory:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
-            "max_tokens": 1000,  # 减少到 1000（原 8000）加快响应
+            "max_tokens": 2000,  # 增加到 2000 以支持详细的分析师报告
             "temperature": 0.6
         }
 
