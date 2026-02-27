@@ -999,7 +999,9 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
 
     try:
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=90)  # 获取更多数据以计算60日均线
+        # 扩展数据获取范围到180天，确保有足够的交易日数据
+        # 180个自然日 ≈ 120-130个交易日，足以计算MA60等技术指标
+        start_date = end_date - timedelta(days=180)
 
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
@@ -1078,9 +1080,14 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
             except Exception as e:
                 print(f"[WARN] AkShare failed: {e}")
 
-        if stock_df is None or stock_df.empty or len(stock_df) < 60:
-            print(f"[WARN] Insufficient data for {symbol}")
-            return None
+        # 降低最小数据要求：30天足够计算MA20、布林带等核心指标
+        # 原60天要求对Baostock等数据源过严（90天范围通常只有60-65个交易日）
+        MIN_DATA_DAYS = 30
+        if stock_df is None or stock_df.empty or len(stock_df) < MIN_DATA_DAYS:
+            print(f"[WARN] Insufficient data for {symbol} (need {MIN_DATA_DAYS} days, got {len(stock_df) if stock_df is not None else 0})")
+            # 数据不足时返回部分可计算的指标，而不是全部None
+            # 这样至少能显示价格信息
+            pass  # 继续处理，在后续计算中处理空值
 
         stock_df = stock_df.sort_values('日期').reset_index(drop=True)
 
@@ -1121,14 +1128,15 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         high_price = float(latest['最高'])
         low_price = float(latest['最低'])
 
-        ma5 = float(latest['MA5'])
-        ma20 = float(latest['MA20'])
-        ma60 = float(latest['MA60'])
+        # 处理可能为NaN的指标值
+        ma5 = float(latest['MA5']) if not pd.isna(latest['MA5']) else None
+        ma20 = float(latest['MA20']) if not pd.isna(latest['MA20']) else None
+        ma60 = float(latest['MA60']) if not pd.isna(latest['MA60']) else None
         vwap_20 = float(latest['VWAP_20']) if not pd.isna(latest['VWAP_20']) else current_price
-        bb_upper = float(latest['BB_Upper'])
-        bb_middle = float(latest['BB_Middle'])
-        bb_lower = float(latest['BB_Lower'])
-        bandwidth = float(latest['BB_Width'])
+        bb_upper = float(latest['BB_Upper']) if not pd.isna(latest['BB_Upper']) else None
+        bb_middle = float(latest['BB_Middle']) if not pd.isna(latest['BB_Middle']) else None
+        bb_lower = float(latest['BB_Lower']) if not pd.isna(latest['BB_Lower']) else None
+        bandwidth = float(latest['BB_Width']) if not pd.isna(latest.get('BB_Width', pd.NA)) else None
         rsi_14 = float(latest['RSI_14']) if not pd.isna(latest['RSI_14']) else 50
 
         # 换手率 (如果AkShare数据中包含)
@@ -1136,9 +1144,9 @@ def get_stock_technical_analysis(symbol: str) -> Optional[Dict]:
         if '换手率' in stock_df.columns:
             turnover = float(latest['换手率']) if not pd.isna(latest['换手率']) else None
 
-        # 均线状态
-        ma20_status = "站上均线" if current_price > ma20 else "跌破均线"
-        ma5_status = "站上MA5" if current_price > ma5 else "跌破MA5"
+        # 均线状态 - 处理None值
+        ma20_status = "站上均线" if ma20 and current_price > ma20 else ("跌破均线" if ma20 else "数据不足")
+        ma5_status = "站上MA5" if ma5 and current_price > ma5 else ("跌破MA5" if ma5 else "数据不足")
 
         # 量能分析
         volume_20 = stock_df.tail(20)['成交量'].mean()
