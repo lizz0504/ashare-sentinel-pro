@@ -116,11 +116,17 @@ class DataFetcher:
         # 配置 Tushare 底层的 requests session
         self._configure_session()
 
+        # 始终设置 token（无论是否有私人链接）
+        self.pro._DataApi__token = self.token
+
         # 设置私人链接（如果配置了）
+        # Tushare token 需要通过私人链接才能正常访问
         if self.http_url:
-            self.pro._DataApi__token = self.token
             self.pro._DataApi__http_url = self.http_url
             print(f"[TUSHARE] Using private URL: {self.http_url}")
+        else:
+            print("[TUSHARE] No private URL configured, using default (may have access issues)")
+            print("[TUSHARE] Set TUSHARE_URL environment variable for better reliability")
 
         # 频率控制
         self.last_request_time = 0
