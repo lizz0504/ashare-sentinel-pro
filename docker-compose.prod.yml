@@ -19,7 +19,7 @@ services:
       - VOLCANO_API_KEY=${VOLCANO_API_KEY}
       - TUSHARE_TOKEN=${TUSHARE_TOKEN}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
-      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://43.134.183.223:3000
     restart: unless-stopped
     networks:
       - ashare-network
